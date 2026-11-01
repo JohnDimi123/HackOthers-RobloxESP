@@ -1,19 +1,27 @@
 --[[
-	Hack Others — Superpowers: ESP + Aimbot (single script)
+	Hack Others — Superpowers (single script)
+	ESP · Aimbot · Ragebot · Fly · Noclip · Teleport
 	Place in: StarterPlayer > StarterPlayerScripts  (as a LocalScript)
 
 	Controls
 	  Q  (gamepad Y)        – ESP on / off
 	  X  (gamepad X)        – Aimbot on / off
-	  Hold right-click      – aim (gamepad: hold L2). Can be switched to
-	                          "always aim" in the menu. On phones it always aims.
+	  Hold right-click      – aim with Aimbot (gamepad: hold L2). Phones always aim.
+	  G                     – Ragebot on / off
+	  F                     – Fly on / off   (Space = up, Ctrl = down)
+	  N                     – Noclip on / off
+	  T                     – Teleport to the closest player
 	  M  / eye button       – open / close the superpowers menu
 
-	Both powers stay on until you turn them off. No timer, no cooldown.
+	Every power stays on until you turn it off. No timers, no cooldowns.
 
-	To lock a power for a player, set on the server:
-	  player:SetAttribute("HasESP", false)       player:SetAttribute("HasAimbot", false)
-	Set back to true to give it again.
+	To lock a power for a player, set on the server (false = locked, true = unlocked):
+	  HasESP, HasAimbot, HasRagebot, HasFly, HasNoclip, HasTeleport
+	  e.g. player:SetAttribute("HasFly", false)
+
+	RAGEBOT + YOUR GUNS: by default Ragebot fires by activating the Tool the
+	player is holding. If your guns shoot a different way, put your own code in
+	fireWeapon() (search for "fireWeapon" below).
 ]]
 
 local Players = game:GetService("Players")
@@ -31,6 +39,10 @@ local ESP_PAD = Enum.KeyCode.ButtonY
 local AIM_KEY = Enum.KeyCode.X
 local AIM_PAD = Enum.KeyCode.ButtonX
 local MENU_KEY = Enum.KeyCode.M
+local RAGE_KEY = Enum.KeyCode.G
+local FLY_KEY = Enum.KeyCode.F
+local NOCLIP_KEY = Enum.KeyCode.N
+local TP_KEY = Enum.KeyCode.T
 
 -- Default settings (all changeable in the menu) --------------------------------
 local SWATCHES = {
@@ -70,6 +82,31 @@ local Aim = { -- Aimbot
 	ShowMarker = true,
 }
 
+local Rage = { -- Ragebot: locks the closest player anywhere and auto-shoots
+	Enabled = false,
+	Part = "Head",
+	WallCheck = false,  -- false = locks on through walls
+	Teammates = false,
+	AutoFire = true,
+	FireRate = 8,       -- shots per second
+	Range = 500,        -- studs
+}
+
+local Fly = {
+	Enabled = false,
+	Speed = 70,
+}
+
+local Noclip = {
+	Enabled = false,
+}
+
+local Teleport = {
+	Side = "Behind",    -- "Behind" or "In front" of the player
+	Gap = 4,            -- studs away from them
+	Teammates = false,
+}
+
 local THEME = {
 	Panel   = Color3.fromRGB(14, 17, 24),
 	PanelHi = Color3.fromRGB(34, 40, 56),
@@ -82,6 +119,8 @@ local THEME = {
 	Muted   = Color3.fromRGB(130, 140, 165),
 	Danger  = Color3.fromRGB(255, 64, 110),
 	Good    = Color3.fromRGB(70, 255, 160),
+	Rage    = Color3.fromRGB(255, 140, 40),
+	Fly     = Color3.fromRGB(110, 200, 255),
 }
 
 -- Helpers ---------------------------------------------------------------------
@@ -125,6 +164,20 @@ end
 
 local function hasAimbot()
 	return player:GetAttribute("HasAimbot") ~= false
+end
+
+local function owns(attr)
+	return player:GetAttribute(attr) ~= false
+end
+
+local POWER_ATTRS = { "HasESP", "HasAimbot", "HasRagebot", "HasFly", "HasNoclip", "HasTeleport" }
+local function ownsAny()
+	for _, a in ipairs(POWER_ATTRS) do
+		if owns(a) then
+			return true
+		end
+	end
+	return false
 end
 
 local rotating = {} -- gradient borders that spin
@@ -297,6 +350,49 @@ end
 
 local espPill = makeStatusPill("ESP ON", THEME.Accent)
 local aimPill = makeStatusPill("AIMBOT ON", THEME.Danger)
+local ragePill = makeStatusPill("RAGEBOT ON", THEME.Rage)
+local flyPill = makeStatusPill("FLY ON", THEME.Fly)
+local noclipPill = makeStatusPill("NOCLIP ON", THEME.Accent2)
+
+-- Toast (small message above the eye button) ------------------------------------
+local TOAST_POS = UDim2.new(1, -104, 1, -44) -- just left of the eye button
+local toastStroke = make("UIStroke", {
+	Color = THEME.Accent,
+	Thickness = 1.5,
+	Transparency = 1,
+	ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+})
+local toast = make("TextLabel", {
+	AnchorPoint = Vector2.new(1, 1),
+	Position = TOAST_POS,
+	Size = UDim2.fromOffset(240, 32),
+	BackgroundColor3 = THEME.Panel,
+	BackgroundTransparency = 1,
+	TextTransparency = 1,
+	Text = "",
+	Font = Enum.Font.GothamBold,
+	TextSize = 13,
+	TextColor3 = THEME.Text,
+	TextTruncate = Enum.TextTruncate.AtEnd,
+	ZIndex = 20,
+	Parent = gui,
+}, { corner(10), toastStroke })
+
+local toastToken = 0
+local function showToast(text, color)
+	toastToken += 1
+	local my = toastToken
+	toast.Text = text
+	toastStroke.Color = color or THEME.Accent
+	toast.Position = TOAST_POS + UDim2.fromOffset(0, 10)
+	tween(toast, 0.25, { BackgroundTransparency = 0.08, TextTransparency = 0, Position = TOAST_POS })
+	tween(toastStroke, 0.25, { Transparency = 0.2 })
+	task.delay(1.8, function()
+		if my ~= toastToken then return end
+		tween(toast, 0.35, { BackgroundTransparency = 1, TextTransparency = 1 })
+		tween(toastStroke, 0.35, { Transparency = 1 })
+	end)
+end
 
 --------------------------------------------------------------------------------
 -- Launcher button (bottom-right) — opens the menu
@@ -714,9 +810,10 @@ local function checkTarget(plr, cam, origin)
 end
 
 local aimOn = false
+local rageOn = false
 
 RunService:BindToRenderStep("HackOthersAimbot", Enum.RenderPriority.Camera.Value + 1, function(dt)
-	if not aimOn then
+	if not aimOn or rageOn then -- Ragebot takes over the camera while it's on
 		fovCircle.Visible = false
 		marker.Visible = false
 		aimTarget = nil
@@ -772,9 +869,291 @@ RunService:BindToRenderStep("HackOthersAimbot", Enum.RenderPriority.Camera.Value
 end)
 
 --------------------------------------------------------------------------------
+-- Ragebot core
+--------------------------------------------------------------------------------
+local lastShot = 0
+
+local rageMarkerStroke = make("UIStroke", { Color = THEME.Rage, Thickness = 2.5 })
+local rageMarker = make("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Size = UDim2.fromOffset(34, 34),
+	BackgroundTransparency = 1,
+	Rotation = 45,
+	Visible = false,
+	Parent = gui,
+}, { corner(6), rageMarkerStroke })
+make("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromOffset(8, 8),
+	BackgroundColor3 = THEME.Rage,
+	Parent = rageMarker,
+}, { pill() })
+
+local function rageAimPart(char)
+	if Rage.Part == "Head" then
+		return char:FindFirstChild("Head")
+	end
+	return char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or char:FindFirstChild("HumanoidRootPart")
+end
+
+-- fireWeapon: how Ragebot shoots. By default it activates the Tool the player
+-- is holding. If your guns work differently (for example a RemoteEvent),
+-- replace the inside of this function with your own shooting code.
+local function fireWeapon(targetPlayer, targetPart)
+	local char = player.Character
+	local tool = char and char:FindFirstChildOfClass("Tool")
+	if tool then
+		tool:Activate()
+	end
+end
+
+local function findRageTarget(myPos)
+	local best, bestPart, bestD
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= player then
+			local char = plr.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			local teamOk = Rage.Teammates or not (plr.Team and plr.Team == player.Team)
+			if hum and hum.Health > 0 and teamOk then
+				local part = rageAimPart(char)
+				if part then
+					local d = (part.Position - myPos).Magnitude
+					if d <= Rage.Range and (not bestD or d < bestD) then
+						local visible = true
+						if Rage.WallCheck then
+							local ignore = { char }
+							if player.Character then
+								table.insert(ignore, player.Character)
+							end
+							rayParams.FilterDescendantsInstances = ignore
+							local from = workspace.CurrentCamera.CFrame.Position
+							visible = workspace:Raycast(from, part.Position - from, rayParams) == nil
+						end
+						if visible then
+							best, bestPart, bestD = plr, part, d
+						end
+					end
+				end
+			end
+		end
+	end
+	return best, bestPart, bestD
+end
+
+RunService:BindToRenderStep("HackOthersRagebot", Enum.RenderPriority.Camera.Value + 2, function()
+	if not rageOn then
+		rageMarker.Visible = false
+		return
+	end
+
+	local cam = workspace.CurrentCamera
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	local myPos = root and root.Position or cam.CFrame.Position
+
+	local plr, part, d = findRageTarget(myPos)
+	if not part then
+		rageMarker.Visible = false
+		ragePill.info.Text = "No target"
+		return
+	end
+
+	-- Hard lock: no smoothing
+	cam.CFrame = CFrame.lookAt(cam.CFrame.Position, part.Position)
+
+	local sp, onScreen = cam:WorldToViewportPoint(part.Position)
+	rageMarker.Visible = onScreen
+	rageMarker.Position = UDim2.fromOffset(sp.X, sp.Y)
+	ragePill.info.Text = ("%s · %dm"):format(plr.DisplayName, math.floor(d + 0.5))
+
+	if Rage.AutoFire then
+		local t = os.clock()
+		if t - lastShot >= 1 / Rage.FireRate then
+			lastShot = t
+			fireWeapon(plr, part)
+		end
+	end
+end)
+
+--------------------------------------------------------------------------------
+-- Fly core
+--------------------------------------------------------------------------------
+local flyOn = false
+local flyParts = nil -- { LinearVelocity, AlignOrientation, Attachment }
+local jumpHeldUntil = 0
+
+UserInputService.JumpRequest:Connect(function()
+	jumpHeldUntil = os.clock() + 0.2 -- lets the mobile jump button work as "up"
+end)
+
+local function destroyFlyParts()
+	if flyParts then
+		for _, inst in ipairs(flyParts) do
+			inst:Destroy()
+		end
+		flyParts = nil
+	end
+end
+
+local function startFlyParts()
+	destroyFlyParts()
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if not (root and hum) then return end
+
+	local att = make("Attachment", { Name = "HackOthersFly", Parent = root })
+	local lv = make("LinearVelocity", {
+		Attachment0 = att,
+		MaxForce = math.huge,
+		RelativeTo = Enum.ActuatorRelativeTo.World,
+		VelocityConstraintMode = Enum.VelocityConstraintMode.Vector,
+		VectorVelocity = Vector3.zero,
+		Parent = root,
+	})
+	local ao = make("AlignOrientation", {
+		Attachment0 = att,
+		Mode = Enum.OrientationAlignmentMode.OneAttachment,
+		MaxTorque = math.huge,
+		Responsiveness = 60,
+		CFrame = root.CFrame.Rotation,
+		Parent = root,
+	})
+	hum.PlatformStand = true
+	flyParts = { lv, ao, att }
+end
+
+local function stopFly()
+	destroyFlyParts()
+	local char = player.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if hum then
+		hum.PlatformStand = false
+		hum:ChangeState(Enum.HumanoidStateType.Freefall)
+	end
+end
+
+RunService:BindToRenderStep("HackOthersFly", Enum.RenderPriority.Camera.Value + 3, function()
+	if not flyOn or not flyParts then return end
+	local char = player.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if not hum then return end
+
+	local cam = workspace.CurrentCamera
+	local look, right = cam.CFrame.LookVector, cam.CFrame.RightVector
+	local flatLook = Vector3.new(look.X, 0, look.Z)
+	flatLook = flatLook.Magnitude > 1e-3 and flatLook.Unit or Vector3.new(0, 0, -1)
+	local flatRight = Vector3.new(right.X, 0, right.Z)
+	flatRight = flatRight.Magnitude > 1e-3 and flatRight.Unit or Vector3.new(1, 0, 0)
+
+	-- WASD / thumbstick, but in the direction the camera faces (so you can fly up/down by looking)
+	local md = hum.MoveDirection
+	local dir = look * md:Dot(flatLook) + right * md:Dot(flatRight)
+
+	if UserInputService:IsKeyDown(Enum.KeyCode.Space) or os.clock() < jumpHeldUntil then
+		dir += Vector3.yAxis
+	end
+	if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl) then
+		dir -= Vector3.yAxis
+	end
+
+	flyParts[1].VectorVelocity = dir.Magnitude > 0.01 and dir.Unit * Fly.Speed or Vector3.zero
+	flyParts[2].CFrame = CFrame.lookAt(Vector3.zero, flatLook)
+end)
+
+--------------------------------------------------------------------------------
+-- Noclip core
+--------------------------------------------------------------------------------
+local noclipOn = false
+local noclipSaved = {} -- [BasePart] = true (parts we turned collisions off for)
+
+RunService.Stepped:Connect(function()
+	if not noclipOn then return end
+	local char = player.Character
+	if not char then return end
+	for _, p in ipairs(char:GetDescendants()) do
+		if p:IsA("BasePart") and p.CanCollide then
+			noclipSaved[p] = true
+			p.CanCollide = false
+		end
+	end
+end)
+
+local function restoreNoclip()
+	for p in pairs(noclipSaved) do
+		if p.Parent then
+			p.CanCollide = true
+		end
+	end
+	table.clear(noclipSaved)
+end
+
+player.CharacterAdded:Connect(function(char)
+	table.clear(noclipSaved)
+	flyParts = nil -- old ones were destroyed with the old character
+	if flyOn then
+		char:WaitForChild("HumanoidRootPart", 5)
+		char:WaitForChild("Humanoid", 5)
+		if flyOn then
+			startFlyParts()
+		end
+	end
+end)
+
+--------------------------------------------------------------------------------
+-- Teleport core
+--------------------------------------------------------------------------------
+local function closestPlayer(includeTeammates)
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root then return nil end
+	local best, bestRoot, bestD
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= player then
+			local c = plr.Character
+			local r = c and c:FindFirstChild("HumanoidRootPart")
+			local hum = c and c:FindFirstChildOfClass("Humanoid")
+			local teamOk = includeTeammates or not (plr.Team and plr.Team == player.Team)
+			if r and hum and hum.Health > 0 and teamOk then
+				local d = (r.Position - root.Position).Magnitude
+				if not bestD or d < bestD then
+					best, bestRoot, bestD = plr, r, d
+				end
+			end
+		end
+	end
+	return best, bestRoot, bestD
+end
+
+local function teleportToClosest()
+	if not owns("HasTeleport") then return end
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root then
+		showToast("You need to be alive to teleport", THEME.Danger)
+		return
+	end
+	local plr, tRoot, d = closestPlayer(Teleport.Teammates)
+	if not plr then
+		showToast("No players to teleport to", THEME.Danger)
+		return
+	end
+
+	local z = Teleport.Side == "Behind" and Teleport.Gap or -Teleport.Gap
+	local spot = (tRoot.CFrame * CFrame.new(0, 0, z)).Position
+	local faceTarget = Vector3.new(tRoot.Position.X, spot.Y, tRoot.Position.Z)
+	char:PivotTo(CFrame.lookAt(spot, faceTarget))
+	root.AssemblyLinearVelocity = Vector3.zero
+
+	playOnFX(THEME.Accent2)
+	showToast(("Teleported to %s (%dm)"):format(plr.DisplayName, math.floor(d + 0.5)), THEME.Accent2)
+end
+
+--------------------------------------------------------------------------------
 -- Menu
 --------------------------------------------------------------------------------
-local setESPEnabled, setAimEnabled -- defined below
+local setESPEnabled, setAimEnabled, setRageEnabled, setFlyEnabled, setNoclipEnabled -- defined below
 
 local menu = make("Frame", {
 	Name = "Menu",
@@ -860,9 +1239,12 @@ local tabBar = make("Frame", {
 	Parent = menu,
 }, { corner(10) })
 
+local TAB_NAMES = { "ESP", "COMBAT", "MOVE" }
+local TAB_COUNT = #TAB_NAMES
+
 local tabIndicator = make("Frame", {
-	Position = UDim2.new(0, 3, 0, 3),
-	Size = UDim2.new(0.5, -4, 1, -6),
+	Position = UDim2.new(0, 2, 0, 3),
+	Size = UDim2.new(1 / TAB_COUNT, -4, 1, -6),
 	BackgroundColor3 = Color3.new(1, 1, 1),
 	Parent = tabBar,
 }, { corner(8), make("UIGradient", { Color = ColorSequence.new(THEME.Accent, THEME.Accent2) }) })
@@ -891,7 +1273,10 @@ local function makePage()
 	})
 end
 
-local pages = { makePage(), makePage() }
+local pages = {}
+for i = 1, TAB_COUNT do
+	pages[i] = makePage()
+end
 local tabButtons = {}
 local currentTab = 1
 
@@ -901,16 +1286,16 @@ local function setTab(i)
 		page.Visible = idx == i
 		tween(tabButtons[idx], 0.2, { TextColor3 = idx == i and THEME.Panel or THEME.Muted })
 	end
-	tween(tabIndicator, 0.3, { Position = UDim2.new((i - 1) * 0.5, i == 1 and 3 or 1, 0, 3) }, Enum.EasingStyle.Back)
+	tween(tabIndicator, 0.3, { Position = UDim2.new((i - 1) / TAB_COUNT, 2, 0, 3) }, Enum.EasingStyle.Back)
 end
 
-for i, name in ipairs({ "ESP", "AIMBOT" }) do
+for i, name in ipairs(TAB_NAMES) do
 	local b = make("TextButton", {
 		Text = name,
 		AutoButtonColor = false,
 		BackgroundTransparency = 1,
-		Position = UDim2.fromScale((i - 1) * 0.5, 0),
-		Size = UDim2.fromScale(0.5, 1),
+		Position = UDim2.fromScale((i - 1) / TAB_COUNT, 0),
+		Size = UDim2.fromScale(1 / TAB_COUNT, 1),
 		Font = Enum.Font.GothamBlack,
 		TextSize = 13,
 		TextColor3 = THEME.Muted,
@@ -928,10 +1313,13 @@ make("TextLabel", {
 	Size = UDim2.new(1, 0, 0, 36),
 	BackgroundTransparency = 1,
 	Text = UserInputService.KeyboardEnabled
-		and (ESP_KEY.Name .. " ESP   ·   " .. AIM_KEY.Name .. " Aimbot   ·   " .. MENU_KEY.Name .. " Menu")
+		and (ESP_KEY.Name .. " ESP · " .. AIM_KEY.Name .. " Aim · " .. RAGE_KEY.Name .. " Rage · "
+			.. FLY_KEY.Name .. " Fly · " .. NOCLIP_KEY.Name .. " Noclip · " .. TP_KEY.Name .. " TP · "
+			.. MENU_KEY.Name .. " Menu")
 		or "Tap the eye button to open this menu",
 	Font = Enum.Font.GothamMedium,
-	TextSize = 12,
+	TextSize = 11,
+	TextWrapped = true,
 	TextColor3 = THEME.Muted,
 	Parent = menu,
 })
@@ -1238,6 +1626,75 @@ local function powerCard(title, onClick)
 	return sw, sub
 end
 
+-- A power card with a one-press action button instead of an on/off switch
+local function actionCard(title, buttonText, color, onClick)
+	local card = make("Frame", {
+		Size = UDim2.new(1, 0, 0, 76),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		LayoutOrder = nextOrder(),
+		Parent = content,
+	}, {
+		corner(14),
+		make("UIGradient", { Rotation = 0, Color = ColorSequence.new(THEME.PanelHi, THEME.Row) }),
+	})
+	spinningStroke(card, 1.5)
+
+	make("TextLabel", {
+		Position = UDim2.fromOffset(16, 13),
+		Size = UDim2.new(1, -120, 0, 26),
+		BackgroundTransparency = 1,
+		Text = title,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 22,
+		TextColor3 = THEME.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = card,
+	})
+
+	local sub = make("TextLabel", {
+		Position = UDim2.fromOffset(16, 42),
+		Size = UDim2.new(1, -120, 0, 18),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+		TextColor3 = THEME.Muted,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Parent = card,
+	})
+
+	local btn = make("TextButton", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -14, 0.5, 0),
+		Size = UDim2.fromOffset(92, 38),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		AutoButtonColor = false,
+		Text = buttonText,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 13,
+		TextColor3 = THEME.Panel,
+		Parent = card,
+	}, {
+		corner(10),
+		make("UIGradient", { Color = ColorSequence.new(color, THEME.Accent) }),
+	})
+	local scale = make("UIScale", { Parent = btn })
+	btn.MouseEnter:Connect(function()
+		tween(scale, 0.15, { Scale = 1.06 })
+	end)
+	btn.MouseLeave:Connect(function()
+		tween(scale, 0.15, { Scale = 1 })
+	end)
+	btn.MouseButton1Down:Connect(function()
+		tween(scale, 0.08, { Scale = 0.92 })
+	end)
+	btn.MouseButton1Up:Connect(function()
+		tween(scale, 0.25, { Scale = 1.06 }, Enum.EasingStyle.Back)
+	end)
+	btn.Activated:Connect(onClick)
+	return sub
+end
+
 -- ESP page --------------------------------------------------------------------
 content = pages[1]
 
@@ -1345,6 +1802,55 @@ section("DISPLAY")
 toggleRow("Show lock-on circle", Aim, "ShowFOV")
 toggleRow("Show target marker", Aim, "ShowMarker")
 
+section(" ")
+local rageSwitch, rageSub = powerCard("RAGEBOT", function()
+	setRageEnabled(not Rage.Enabled)
+end)
+
+section("RAGEBOT")
+segmentedRow("Aim at", { "Head", "Body" }, Rage, "Part")
+toggleRow("Auto shoot", Rage, "AutoFire")
+toggleRow("Wall check", Rage, "WallCheck")
+toggleRow("Target teammates", Rage, "Teammates")
+makeSlider("Fire rate", 1, 20, Rage.FireRate, function(v)
+	return math.floor(v + 0.5) .. "/s"
+end, function(v)
+	Rage.FireRate = math.floor(v + 0.5)
+end)
+makeSlider("Range", 50, 2000, Rage.Range, function(v)
+	return math.floor(v + 0.5) .. "m"
+end, function(v)
+	Rage.Range = math.floor(v + 0.5)
+end)
+
+-- Movement page ---------------------------------------------------------------
+content = pages[3]
+
+local flySwitch, flySub = powerCard("FLY", function()
+	setFlyEnabled(not Fly.Enabled)
+end)
+makeSlider("Fly speed", 16, 300, Fly.Speed, function(v)
+	return tostring(math.floor(v + 0.5))
+end, function(v)
+	Fly.Speed = math.floor(v + 0.5)
+	flyPill.info.Text = Fly.Speed .. " speed"
+end)
+
+section(" ")
+local noclipSwitch, noclipSub = powerCard("NOCLIP", function()
+	setNoclipEnabled(not Noclip.Enabled)
+end)
+
+section(" ")
+local tpSub = actionCard("TELEPORT", "TELEPORT", THEME.Accent2, teleportToClosest)
+segmentedRow("Land", { "Behind", "In front" }, Teleport, "Side")
+makeSlider("Distance from them", 2, 15, Teleport.Gap, function(v)
+	return math.floor(v + 0.5) .. " studs"
+end, function(v)
+	Teleport.Gap = math.floor(v + 0.5)
+end)
+toggleRow("Include teammates", Teleport, "Teammates")
+
 setTab(1)
 
 -- Menu dragging + slider dragging ----------------------------------------------
@@ -1386,7 +1892,7 @@ end)
 -- Open / close ------------------------------------------------------------------
 local menuOpen = false
 local function setMenu(open)
-	if open and not (hasESP() or hasAimbot()) then return end
+	if open and not ownsAny() then return end
 	menuOpen = open
 	if open then
 		menu.Visible = true
@@ -1412,31 +1918,85 @@ end)
 --------------------------------------------------------------------------------
 -- Turning powers on / off
 --------------------------------------------------------------------------------
+local function anyPowerOn()
+	return Settings.Enabled or Aim.Enabled or Rage.Enabled or Fly.Enabled or Noclip.Enabled
+end
+
 local function refreshLauncher()
-	local any = Settings.Enabled or Aim.Enabled
+	local any = anyPowerOn()
 	tween(launcherDot, 0.2, { BackgroundColor3 = any and THEME.Good or THEME.Track })
 	if not any then
 		tween(launcherGlow, 0.3, { BackgroundTransparency = 1 })
 	end
 end
 
-local function refreshCardText()
-	if not hasESP() then
-		espSub.Text, espSub.TextColor3 = "Locked", THEME.Muted
-	else
-		espSub.Text = Settings.Enabled and "On · everyone is revealed" or "Off · reveal everyone through walls"
-		espSub.TextColor3 = Settings.Enabled and THEME.Accent or THEME.Muted
+local function cardText(sub, attr, on, onText, offText, color)
+	if not owns(attr) then
+		sub.Text, sub.TextColor3 = "Locked", THEME.Muted
+		return
 	end
-	if not hasAimbot() then
-		aimSub.Text, aimSub.TextColor3 = "Locked", THEME.Muted
-	else
-		aimSub.Text = Aim.Enabled and "On · locks onto the nearest player" or "Off · auto-aim at other players"
-		aimSub.TextColor3 = Aim.Enabled and THEME.Danger or THEME.Muted
+	sub.Text = on and onText or offText
+	sub.TextColor3 = on and color or THEME.Muted
+end
+
+local flyHint = UserInputService.KeyboardEnabled and "On · Space up, Ctrl down" or "On · hold jump to rise"
+
+local function refreshCardText()
+	cardText(espSub, "HasESP", Settings.Enabled, "On · everyone is revealed", "Off · reveal everyone through walls", THEME.Accent)
+	cardText(aimSub, "HasAimbot", Aim.Enabled, "On · locks onto the nearest player", "Off · auto-aim at other players", THEME.Danger)
+	cardText(rageSub, "HasRagebot", Rage.Enabled, "On · locking the closest player", "Off · hard lock + auto shoot", THEME.Rage)
+	cardText(flySub, "HasFly", Fly.Enabled, flyHint, "Off · fly anywhere", THEME.Fly)
+	cardText(noclipSub, "HasNoclip", Noclip.Enabled, "On · walking through walls", "Off · walk through walls", THEME.Accent2)
+	cardText(tpSub, "HasTeleport", false, "", "Jump to the closest player", THEME.Accent2)
+end
+
+-- Builds an on/off function for a power
+local function makeSetter(tbl, attr, switch, pillObj, color, apply)
+	return function(on)
+		if on and not owns(attr) then return end
+		if on == tbl.Enabled then return end
+		tbl.Enabled = on
+		switch.set(on)
+		if apply then
+			apply(on)
+		end
+		if pillObj then
+			pillObj.on = on
+			layoutPills()
+		end
+		refreshCardText()
+		refreshLauncher()
+		if on then
+			playOnFX(color)
+			popLauncher()
+		end
 	end
 end
 
+setRageEnabled = makeSetter(Rage, "HasRagebot", rageSwitch, ragePill, THEME.Rage, function(on)
+	rageOn = on
+end)
+
+setFlyEnabled = makeSetter(Fly, "HasFly", flySwitch, flyPill, THEME.Fly, function(on)
+	flyOn = on
+	flyPill.info.Text = Fly.Speed .. " speed"
+	if on then
+		startFlyParts()
+	else
+		stopFly()
+	end
+end)
+
+setNoclipEnabled = makeSetter(Noclip, "HasNoclip", noclipSwitch, noclipPill, THEME.Accent2, function(on)
+	noclipOn = on
+	noclipPill.info.Text = "walls off"
+	if not on then
+		restoreNoclip()
+	end
+end)
+
 setESPEnabled = function(on)
-	if on and not hasESP() then return end
+	if on and not owns("HasESP") then return end
 	if on == Settings.Enabled then return end
 	Settings.Enabled = on
 	espSwitch.set(on)
@@ -1452,7 +2012,7 @@ setESPEnabled = function(on)
 end
 
 setAimEnabled = function(on)
-	if on and not hasAimbot() then return end
+	if on and not owns("HasAimbot") then return end
 	if on == Aim.Enabled then return end
 	Aim.Enabled = on
 	aimOn = on
@@ -1488,22 +2048,42 @@ ContextActionService:BindAction("HackOthers_Menu", function(_, inputState)
 	return Enum.ContextActionResult.Sink
 end, false, MENU_KEY)
 
+local function bindKey(name, key, fn)
+	ContextActionService:BindAction(name, function(_, inputState)
+		if inputState == Enum.UserInputState.Begin then
+			fn()
+		end
+		return Enum.ContextActionResult.Sink
+	end, false, key)
+end
+
+bindKey("HackOthers_Rage", RAGE_KEY, function()
+	setRageEnabled(not Rage.Enabled)
+end)
+bindKey("HackOthers_Fly", FLY_KEY, function()
+	setFlyEnabled(not Fly.Enabled)
+end)
+bindKey("HackOthers_Noclip", NOCLIP_KEY, function()
+	setNoclipEnabled(not Noclip.Enabled)
+end)
+bindKey("HackOthers_Teleport", TP_KEY, teleportToClosest)
+
 local function refreshOwnership()
-	if not hasESP() then
-		setESPEnabled(false)
-	end
-	if not hasAimbot() then
-		setAimEnabled(false)
-	end
-	local any = hasESP() or hasAimbot()
+	if not owns("HasESP") then setESPEnabled(false) end
+	if not owns("HasAimbot") then setAimEnabled(false) end
+	if not owns("HasRagebot") then setRageEnabled(false) end
+	if not owns("HasFly") then setFlyEnabled(false) end
+	if not owns("HasNoclip") then setNoclipEnabled(false) end
+	local any = ownsAny()
 	launcherHolder.Visible = any
 	if not any then
 		setMenu(false)
 	end
 	refreshCardText()
 end
-player:GetAttributeChangedSignal("HasESP"):Connect(refreshOwnership)
-player:GetAttributeChangedSignal("HasAimbot"):Connect(refreshOwnership)
+for _, attr in ipairs(POWER_ATTRS) do
+	player:GetAttributeChangedSignal(attr):Connect(refreshOwnership)
+end
 refreshOwnership()
 
 --------------------------------------------------------------------------------
@@ -1514,7 +2094,7 @@ local lastTagUpdate = 0
 RunService.RenderStepped:Connect(function(dt)
 	local t = os.clock()
 	local pulse = (math.sin(t * 5) + 1) / 2
-	local anyOn = espOn or aimOn
+	local anyOn = espOn or aimOn or rageOn or flyOn or noclipOn
 
 	for _, g in ipairs(rotating) do
 		g.Rotation = (g.Rotation + dt * (anyOn and 200 or 45)) % 360
@@ -1531,9 +2111,11 @@ RunService.RenderStepped:Connect(function(dt)
 	if anyOn then
 		launcherGlow.BackgroundTransparency = 0.72 + pulse * 0.2
 	end
-	espPill.dot.BackgroundTransparency = pulse * 0.7
-	aimPill.dot.BackgroundTransparency = pulse * 0.7
+	for _, p in ipairs(pills) do
+		p.dot.BackgroundTransparency = pulse * 0.7
+	end
 	marker.Rotation = 45 + math.sin(t * 4) * 8
+	rageMarker.Rotation = (rageMarker.Rotation + dt * 180) % 360
 
 	-- Update ESP tags ~10x per second
 	if espOn and t - lastTagUpdate > 0.1 then
