@@ -1,0 +1,834 @@
+--[[
+	Hack Others — ESP Superpower (single script)
+	Place in: StarterPlayer > StarterPlayerScripts  (as a LocalScript)
+
+	Press Q (or tap the ESP button / gamepad Y) to activate.
+	While active, every other player is outlined through walls with a
+	floating tag showing their name, distance and health.
+
+	To lock the power for a player, set on the server:
+	  player:SetAttribute("HasESP", false)   -- hides the button
+	  player:SetAttribute("HasESP", true)    -- shows it again
+]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local ContextActionService = game:GetService("ContextActionService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- Settings --------------------------------------------------------------------
+local KEYBIND = Enum.KeyCode.Q
+local GAMEPAD_BIND = Enum.KeyCode.ButtonY
+local SHOW_TEAMMATES = true -- set false to only reveal players on other teams
+
+local DURATION = 8   -- seconds ESP stays active
+local COOLDOWN = 20  -- seconds to recharge after it ends
+
+local THEME = {
+	Panel   = Color3.fromRGB(14, 17, 24),
+	PanelHi = Color3.fromRGB(34, 40, 56),
+	Track   = Color3.fromRGB(30, 35, 48),
+	Accent  = Color3.fromRGB(0, 229, 255),
+	Accent2 = Color3.fromRGB(150, 90, 255),
+	Text    = Color3.fromRGB(235, 240, 255),
+	Muted   = Color3.fromRGB(130, 140, 165),
+	Danger  = Color3.fromRGB(255, 64, 110),
+	Good    = Color3.fromRGB(70, 255, 160),
+}
+
+-- Helpers ---------------------------------------------------------------------
+local function make(className, props, children)
+	local inst = Instance.new(className)
+	for k, v in pairs(props or {}) do
+		if k ~= "Parent" then
+			inst[k] = v
+		end
+	end
+	for _, child in ipairs(children or {}) do
+		child.Parent = inst
+	end
+	if props and props.Parent then
+		inst.Parent = props.Parent
+	end
+	return inst
+end
+
+local function corner(r)
+	return make("UICorner", { CornerRadius = UDim.new(0, r) })
+end
+
+local function tween(inst, t, props, style, dir)
+	local tw = TweenService:Create(
+		inst,
+		TweenInfo.new(t, style or Enum.EasingStyle.Quint, dir or Enum.EasingDirection.Out),
+		props
+	)
+	tw:Play()
+	return tw
+end
+
+local function now()
+	return os.clock()
+end
+
+local espEndsAt, espReadyAt = 0, 0
+local function getTimes()
+	return espEndsAt, espReadyAt
+end
+
+local function hasESP()
+	return player:GetAttribute("HasESP") ~= false
+end
+
+--------------------------------------------------------------------------------
+-- UI
+--------------------------------------------------------------------------------
+local gui = make("ScreenGui", {
+	Name = "HackOthersESP",
+	ResetOnSpawn = false,
+	IgnoreGuiInset = true,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	DisplayOrder = 10,
+	Parent = playerGui,
+})
+
+-- Screen-edge glow while active
+local edges = {}
+local function edge(pos, size, rotation)
+	local f = make("Frame", {
+		BackgroundColor3 = THEME.Accent,
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Position = pos,
+		Size = size,
+		Parent = gui,
+	}, {
+		make("UIGradient", { Rotation = rotation, Transparency = NumberSequence.new(0, 1) }),
+	})
+	table.insert(edges, f)
+end
+edge(UDim2.fromScale(0, 0), UDim2.fromScale(1, 0.16), 90)
+edge(UDim2.fromScale(0, 0.84), UDim2.fromScale(1, 0.16), -90)
+edge(UDim2.fromScale(0, 0), UDim2.fromScale(0.1, 1), 0)
+edge(UDim2.fromScale(0.9, 0), UDim2.fromScale(0.1, 1), 180)
+
+-- Activation flash + scan line
+local flash = make("Frame", {
+	BackgroundColor3 = THEME.Accent,
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	Size = UDim2.fromScale(1, 1),
+	Parent = gui,
+})
+
+local scan = make("Frame", {
+	AnchorPoint = Vector2.new(0, 0.5),
+	BackgroundColor3 = THEME.Accent,
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	Size = UDim2.new(1, 0, 0, 3),
+	Parent = gui,
+}, {
+	make("UIGradient", {
+		Transparency = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 1),
+			NumberSequenceKeypoint.new(0.5, 0),
+			NumberSequenceKeypoint.new(1, 1),
+		}),
+	}),
+})
+
+-- Ability widget (bottom-right) ------------------------------------------------
+local ability = make("Frame", {
+	Name = "Ability",
+	AnchorPoint = Vector2.new(1, 1),
+	Position = UDim2.new(1, -28, 1, -28),
+	Size = UDim2.fromOffset(104, 140),
+	BackgroundTransparency = 1,
+	Parent = gui,
+})
+
+local cardHolder = make("Frame", {
+	Size = UDim2.fromOffset(104, 104),
+	BackgroundTransparency = 1,
+	Parent = ability,
+})
+
+local glow = make("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.new(1, 16, 1, 16),
+	BackgroundColor3 = THEME.Accent,
+	BackgroundTransparency = 1,
+	ZIndex = 0,
+	Parent = cardHolder,
+}, { corner(30) })
+
+local card = make("TextButton", {
+	Name = "Card",
+	Text = "",
+	AutoButtonColor = false,
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromScale(1, 1),
+	BackgroundColor3 = Color3.new(1, 1, 1),
+	ZIndex = 1,
+	Parent = cardHolder,
+}, {
+	corner(24),
+	make("UIGradient", { Rotation = 90, Color = ColorSequence.new(THEME.PanelHi, THEME.Panel) }),
+})
+local cardScale = make("UIScale", { Parent = card })
+
+local stroke = make("UIStroke", {
+	Thickness = 2,
+	Color = Color3.new(1, 1, 1),
+	ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+	Parent = card,
+})
+local strokeGrad = make("UIGradient", {
+	Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, THEME.Accent),
+		ColorSequenceKeypoint.new(0.5, THEME.Accent2),
+		ColorSequenceKeypoint.new(1, THEME.Accent),
+	}),
+	Parent = stroke,
+})
+
+-- Eye icon
+local eyeStroke = make("UIStroke", { Thickness = 2.5, Color = THEME.Accent })
+local eye = make("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.4),
+	Size = UDim2.fromOffset(54, 30),
+	BackgroundTransparency = 1,
+	ZIndex = 2,
+	Parent = card,
+}, { corner(15), eyeStroke })
+
+local iris = make("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromOffset(18, 18),
+	BackgroundColor3 = THEME.Accent,
+	ZIndex = 3,
+	Parent = eye,
+}, { corner(9) })
+
+make("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromOffset(7, 7),
+	BackgroundColor3 = THEME.Panel,
+	ZIndex = 4,
+	Parent = iris,
+}, { corner(4) })
+
+make("TextLabel", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.78),
+	Size = UDim2.new(1, 0, 0, 20),
+	BackgroundTransparency = 1,
+	Text = "ESP",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 18,
+	TextColor3 = THEME.Text,
+	ZIndex = 2,
+	Parent = card,
+})
+
+-- Cooldown overlay (hard-edged gradient = clean fill that respects round corners)
+local cdOverlay = make("Frame", {
+	Size = UDim2.fromScale(1, 1),
+	BackgroundColor3 = Color3.new(0, 0, 0),
+	Visible = false,
+	ZIndex = 5,
+	Parent = card,
+}, { corner(24) })
+local cdGrad = make("UIGradient", { Rotation = 90, Parent = cdOverlay })
+
+local cdText = make("TextLabel", {
+	Size = UDim2.fromScale(1, 1),
+	BackgroundTransparency = 1,
+	Text = "",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 30,
+	TextColor3 = THEME.Text,
+	ZIndex = 6,
+	Parent = card,
+}, { make("UIStroke", { Thickness = 1.5, Transparency = 0.4 }) })
+
+local function setCooldownFill(r)
+	r = math.clamp(r, 0.002, 0.998)
+	cdGrad.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1),
+		NumberSequenceKeypoint.new(1 - r - 0.001, 1),
+		NumberSequenceKeypoint.new(1 - r, 0.35),
+		NumberSequenceKeypoint.new(1, 0.35),
+	})
+end
+
+-- Keybind chip
+make("TextLabel", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.new(1, -6, 0, 6),
+	Size = UDim2.fromOffset(26, 26),
+	BackgroundColor3 = THEME.Panel,
+	Text = KEYBIND.Name,
+	Font = Enum.Font.GothamBold,
+	TextSize = 13,
+	TextColor3 = THEME.Text,
+	ZIndex = 7,
+	Visible = UserInputService.KeyboardEnabled,
+	Parent = cardHolder,
+}, {
+	corner(8),
+	make("UIStroke", { Color = THEME.Accent, Thickness = 1.5, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }),
+})
+
+-- Charge bar + status
+local barBg = make("Frame", {
+	Position = UDim2.fromOffset(8, 112),
+	Size = UDim2.new(1, -16, 0, 6),
+	BackgroundColor3 = THEME.Track,
+	BorderSizePixel = 0,
+	Parent = ability,
+}, { corner(3) })
+
+local barGrad = make("UIGradient", { Color = ColorSequence.new(THEME.Accent, THEME.Accent2) })
+local barFill = make("Frame", {
+	Size = UDim2.fromScale(1, 1),
+	BackgroundColor3 = Color3.new(1, 1, 1),
+	BorderSizePixel = 0,
+	Parent = barBg,
+}, { corner(3), barGrad })
+
+local status = make("TextLabel", {
+	Position = UDim2.fromOffset(0, 121),
+	Size = UDim2.new(1, 0, 0, 16),
+	BackgroundTransparency = 1,
+	Text = "READY",
+	Font = Enum.Font.GothamBold,
+	TextSize = 12,
+	TextColor3 = THEME.Good,
+	Parent = ability,
+})
+
+-- Active banner (top-center) ----------------------------------------------------
+local BANNER_SHOWN = UDim2.new(0.5, 0, 0, 70)
+local BANNER_HIDDEN = UDim2.new(0.5, 0, 0, -90)
+
+local banner = make("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0),
+	Position = BANNER_HIDDEN,
+	Size = UDim2.fromOffset(300, 64),
+	BackgroundColor3 = Color3.new(1, 1, 1),
+	Parent = gui,
+}, {
+	corner(14),
+	make("UIGradient", { Rotation = 90, Color = ColorSequence.new(THEME.PanelHi, THEME.Panel) }),
+	make("UIStroke", { Color = THEME.Accent, Thickness = 1.5, Transparency = 0.2 }),
+})
+
+local liveDot = make("Frame", {
+	Position = UDim2.fromOffset(16, 16),
+	Size = UDim2.fromOffset(9, 9),
+	BackgroundColor3 = THEME.Accent,
+	Parent = banner,
+}, { corner(5) })
+
+make("TextLabel", {
+	Position = UDim2.fromOffset(32, 9),
+	Size = UDim2.new(1, -120, 0, 22),
+	BackgroundTransparency = 1,
+	Text = "ESP ONLINE",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 18,
+	TextColor3 = THEME.Accent,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	Parent = banner,
+})
+
+local bannerSub = make("TextLabel", {
+	Position = UDim2.fromOffset(16, 31),
+	Size = UDim2.new(1, -120, 0, 16),
+	BackgroundTransparency = 1,
+	Text = "Scanning…",
+	Font = Enum.Font.GothamMedium,
+	TextSize = 13,
+	TextColor3 = THEME.Muted,
+	TextXAlignment = Enum.TextXAlignment.Left,
+	Parent = banner,
+})
+
+local bannerTime = make("TextLabel", {
+	AnchorPoint = Vector2.new(1, 0),
+	Position = UDim2.new(1, -16, 0, 8),
+	Size = UDim2.fromOffset(90, 40),
+	BackgroundTransparency = 1,
+	Text = "0.0s",
+	Font = Enum.Font.GothamBlack,
+	TextSize = 26,
+	TextColor3 = THEME.Text,
+	TextXAlignment = Enum.TextXAlignment.Right,
+	Parent = banner,
+})
+
+local bannerBarBg = make("Frame", {
+	Position = UDim2.new(0, 16, 1, -12),
+	Size = UDim2.new(1, -32, 0, 4),
+	BackgroundColor3 = THEME.Track,
+	BorderSizePixel = 0,
+	Parent = banner,
+}, { corner(2) })
+
+local bannerFill = make("Frame", {
+	Size = UDim2.fromScale(1, 1),
+	BackgroundColor3 = Color3.new(1, 1, 1),
+	BorderSizePixel = 0,
+	Parent = bannerBarBg,
+}, {
+	corner(2),
+	make("UIGradient", { Color = ColorSequence.new(THEME.Accent, THEME.Accent2) }),
+})
+
+-- Toast -------------------------------------------------------------------------
+local TOAST_POS = UDim2.new(1, -28, 1, -176)
+local toastStroke = make("UIStroke", {
+	Color = THEME.Accent,
+	Thickness = 1.5,
+	Transparency = 1,
+	ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+})
+local toast = make("TextLabel", {
+	AnchorPoint = Vector2.new(1, 1),
+	Position = TOAST_POS,
+	Size = UDim2.fromOffset(220, 32),
+	BackgroundColor3 = THEME.Panel,
+	BackgroundTransparency = 1,
+	TextTransparency = 1,
+	Text = "",
+	Font = Enum.Font.GothamBold,
+	TextSize = 13,
+	TextColor3 = THEME.Text,
+	Parent = gui,
+}, { corner(10), toastStroke })
+
+local toastToken = 0
+local function showToast(text, color)
+	toastToken += 1
+	local my = toastToken
+	toast.Text = text
+	toastStroke.Color = color or THEME.Accent
+	toast.Position = TOAST_POS + UDim2.fromOffset(0, 10)
+	tween(toast, 0.25, { BackgroundTransparency = 0.08, TextTransparency = 0, Position = TOAST_POS })
+	tween(toastStroke, 0.25, { Transparency = 0.2 })
+	task.delay(1.8, function()
+		if my ~= toastToken then return end
+		tween(toast, 0.35, { BackgroundTransparency = 1, TextTransparency = 1 })
+		tween(toastStroke, 0.35, { Transparency = 1 })
+	end)
+end
+
+--------------------------------------------------------------------------------
+-- Input
+--------------------------------------------------------------------------------
+local hovering = false
+local lastRequest = 0
+
+local function shake()
+	task.spawn(function()
+		for _, x in ipairs({ 9, -8, 6, -4, 2, 0 }) do
+			tween(card, 0.04, { Position = UDim2.new(0.5, x, 0.5, 0) }, Enum.EasingStyle.Sine)
+			task.wait(0.04)
+		end
+	end)
+end
+
+local function tryActivate()
+	if not hasESP() then return end
+	local endsAt, readyAt = getTimes()
+	local t = now()
+	if t < endsAt then
+		showToast("ESP is already active", THEME.Accent)
+		return
+	end
+	if t < readyAt then
+		shake()
+		showToast(("Recharging — %.1fs left"):format(readyAt - t), THEME.Danger)
+		return
+	end
+	if t - lastRequest < 0.3 then return end
+	lastRequest = t
+	espEndsAt = t + DURATION
+	espReadyAt = espEndsAt + COOLDOWN
+end
+
+card.MouseEnter:Connect(function()
+	hovering = true
+	tween(cardScale, 0.2, { Scale = 1.06 })
+end)
+card.MouseLeave:Connect(function()
+	hovering = false
+	tween(cardScale, 0.2, { Scale = 1 })
+end)
+card.MouseButton1Down:Connect(function()
+	tween(cardScale, 0.1, { Scale = 0.93 })
+end)
+card.MouseButton1Up:Connect(function()
+	tween(cardScale, 0.2, { Scale = hovering and 1.06 or 1 }, Enum.EasingStyle.Back)
+end)
+card.Activated:Connect(tryActivate)
+
+ContextActionService:BindAction("HackOthers_ESP", function(_, inputState)
+	if inputState == Enum.UserInputState.Begin then
+		tryActivate()
+	end
+	return Enum.ContextActionResult.Sink
+end, false, KEYBIND, GAMEPAD_BIND)
+
+local function refreshOwnership()
+	ability.Visible = hasESP()
+end
+player:GetAttributeChangedSignal("HasESP"):Connect(refreshOwnership)
+refreshOwnership()
+
+--------------------------------------------------------------------------------
+-- ESP rendering
+--------------------------------------------------------------------------------
+local espOn = false
+local targets = {}      -- [Player] = info
+local playerConns = {}  -- [Player] = CharacterAdded connection
+
+local function targetColor(plr)
+	if plr.Team then
+		return plr.TeamColor.Color
+	end
+	return THEME.Danger
+end
+
+local function detach(plr, instant)
+	local info = targets[plr]
+	if not info then return end
+	targets[plr] = nil
+	for _, c in ipairs(info.conns) do
+		c:Disconnect()
+	end
+	if instant then
+		info.highlight:Destroy()
+		info.billboard:Destroy()
+		return
+	end
+	tween(info.highlight, 0.25, { FillTransparency = 1, OutlineTransparency = 1 })
+	tween(info.scale, 0.2, { Scale = 0 }, Enum.EasingStyle.Back, Enum.EasingDirection.In)
+	task.delay(0.3, function()
+		info.highlight:Destroy()
+		info.billboard:Destroy()
+	end)
+end
+
+local function attach(plr, character)
+	detach(plr, true)
+	if not espOn or plr == player then return end
+	if not SHOW_TEAMMATES and plr.Team and plr.Team == player.Team then return end
+
+	local humanoid = character:WaitForChild("Humanoid", 5)
+	local head = character:WaitForChild("Head", 5)
+	if not (humanoid and head) then return end
+	if not espOn or plr.Character ~= character or targets[plr] then return end
+
+	local color = targetColor(plr)
+
+	-- Created on the client, so only this player can see it
+	local highlight = make("Highlight", {
+		Adornee = character,
+		DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+		FillColor = color,
+		FillTransparency = 1,
+		OutlineColor = color,
+		OutlineTransparency = 1,
+		Parent = character,
+	})
+	tween(highlight, 0.4, { FillTransparency = 0.72, OutlineTransparency = 0 })
+
+	local billboard = make("BillboardGui", {
+		Name = "ESPTag_" .. plr.Name,
+		Adornee = head,
+		AlwaysOnTop = true,
+		LightInfluence = 0,
+		ResetOnSpawn = false,
+		Size = UDim2.fromOffset(160, 46),
+		StudsOffset = Vector3.new(0, 2.6, 0),
+		MaxDistance = math.huge,
+		Parent = playerGui,
+	})
+
+	local panel = make("Frame", {
+		AnchorPoint = Vector2.new(0.5, 1),
+		Position = UDim2.fromScale(0.5, 1),
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = THEME.Panel,
+		BackgroundTransparency = 0.18,
+		Parent = billboard,
+	}, {
+		corner(10),
+		make("UIStroke", { Color = color, Thickness = 1.5, Transparency = 0.1 }),
+	})
+	local scale = make("UIScale", { Scale = 0, Parent = panel })
+
+	make("TextLabel", {
+		Position = UDim2.fromOffset(10, 5),
+		Size = UDim2.new(1, -66, 0, 18),
+		BackgroundTransparency = 1,
+		Text = plr.DisplayName,
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+		TextColor3 = THEME.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Parent = panel,
+	})
+
+	local distLabel = make("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -10, 0, 5),
+		Size = UDim2.fromOffset(54, 18),
+		BackgroundTransparency = 1,
+		Text = "",
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+		TextColor3 = THEME.Muted,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Parent = panel,
+	})
+
+	local hpBg = make("Frame", {
+		Position = UDim2.new(0, 10, 1, -15),
+		Size = UDim2.new(1, -20, 0, 6),
+		BackgroundColor3 = THEME.Track,
+		BorderSizePixel = 0,
+		Parent = panel,
+	}, { corner(3) })
+
+	local hpFill = make("Frame", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = THEME.Good,
+		BorderSizePixel = 0,
+		Parent = hpBg,
+	}, { corner(3) })
+
+	tween(scale, 0.4, { Scale = 1 }, Enum.EasingStyle.Back)
+
+	local info = {
+		highlight = highlight,
+		billboard = billboard,
+		scale = scale,
+		head = head,
+		humanoid = humanoid,
+		dist = distLabel,
+		hpFill = hpFill,
+		conns = {},
+	}
+	targets[plr] = info
+
+	table.insert(info.conns, humanoid.Died:Connect(function()
+		detach(plr)
+	end))
+	table.insert(info.conns, character.AncestryChanged:Connect(function(_, parent)
+		if not parent then
+			detach(plr, true)
+		end
+	end))
+end
+
+local function trackPlayer(plr)
+	if plr == player or playerConns[plr] then return end
+	playerConns[plr] = plr.CharacterAdded:Connect(function(char)
+		attach(plr, char)
+	end)
+	if plr.Character then
+		task.spawn(attach, plr, plr.Character)
+	end
+end
+
+local function untrackPlayer(plr)
+	if playerConns[plr] then
+		playerConns[plr]:Disconnect()
+		playerConns[plr] = nil
+	end
+	detach(plr)
+end
+
+Players.PlayerAdded:Connect(function(plr)
+	if espOn then
+		trackPlayer(plr)
+	end
+end)
+Players.PlayerRemoving:Connect(untrackPlayer)
+
+local function setESP(on)
+	if on == espOn then return end
+	espOn = on
+	if on then
+		for _, plr in ipairs(Players:GetPlayers()) do
+			trackPlayer(plr)
+		end
+	else
+		for plr in pairs(playerConns) do
+			untrackPlayer(plr)
+		end
+		for plr in pairs(targets) do
+			detach(plr)
+		end
+	end
+end
+
+--------------------------------------------------------------------------------
+-- Effects
+--------------------------------------------------------------------------------
+local function playActivateFX()
+	flash.BackgroundTransparency = 0.7
+	tween(flash, 0.7, { BackgroundTransparency = 1 })
+
+	scan.Position = UDim2.fromScale(0, 0)
+	scan.BackgroundTransparency = 0
+	tween(scan, 0.75, { Position = UDim2.fromScale(0, 1) }, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+		.Completed:Connect(function()
+			scan.BackgroundTransparency = 1
+		end)
+
+	tween(banner, 0.55, { Position = BANNER_SHOWN }, Enum.EasingStyle.Back)
+	tween(glow, 0.3, { BackgroundTransparency = 0.75 })
+
+	cardScale.Scale = 1.18
+	tween(cardScale, 0.45, { Scale = hovering and 1.06 or 1 }, Enum.EasingStyle.Back)
+end
+
+local function playEndFX()
+	tween(banner, 0.4, { Position = BANNER_HIDDEN }, Enum.EasingStyle.Back, Enum.EasingDirection.In)
+	tween(glow, 0.4, { BackgroundTransparency = 1 })
+	showToast("ESP offline — recharging", THEME.Muted)
+end
+
+local function playReadyFX()
+	showToast("ESP ready", THEME.Good)
+	glow.BackgroundColor3 = THEME.Good
+	glow.BackgroundTransparency = 0.6
+	tween(glow, 0.8, { BackgroundTransparency = 1 }).Completed:Connect(function()
+		glow.BackgroundColor3 = THEME.Accent
+	end)
+	cardScale.Scale = 1.1
+	tween(cardScale, 0.4, { Scale = hovering and 1.06 or 1 }, Enum.EasingStyle.Back)
+end
+
+local function applyStateStyle(state)
+	if state == "active" then
+		status.Text = "ACTIVE"
+		status.TextColor3 = THEME.Accent
+		barGrad.Color = ColorSequence.new(THEME.Accent, THEME.Accent2)
+		eyeStroke.Color = THEME.Accent
+		iris.BackgroundColor3 = THEME.Accent
+		cdOverlay.Visible = false
+		cdText.Text = ""
+	elseif state == "cooling" then
+		status.Text = "RECHARGING"
+		status.TextColor3 = THEME.Muted
+		barGrad.Color = ColorSequence.new(THEME.Muted, THEME.Muted)
+		eyeStroke.Color = THEME.Muted
+		iris.BackgroundColor3 = THEME.Muted
+		cdOverlay.Visible = true
+	else
+		status.Text = "READY"
+		status.TextColor3 = THEME.Good
+		barGrad.Color = ColorSequence.new(THEME.Accent, THEME.Accent2)
+		eyeStroke.Color = THEME.Accent
+		iris.BackgroundColor3 = THEME.Accent
+		cdOverlay.Visible = false
+		cdText.Text = ""
+		barFill.Size = UDim2.fromScale(1, 1)
+	end
+end
+
+--------------------------------------------------------------------------------
+-- Main loop
+--------------------------------------------------------------------------------
+local uiState = nil
+local edgeStrength = 0
+local lastTagUpdate = 0
+
+RunService.RenderStepped:Connect(function(dt)
+	local t = now()
+	local endsAt, readyAt = getTimes()
+	local state = (t < endsAt and "active") or (t < readyAt and "cooling") or "ready"
+
+	if state ~= uiState then
+		local prev = uiState
+		uiState = state
+		applyStateStyle(state)
+		setESP(state == "active")
+		if prev ~= nil then
+			if state == "active" then
+				playActivateFX()
+			elseif prev == "active" then
+				playEndFX()
+			elseif state == "ready" and prev == "cooling" then
+				playReadyFX()
+			end
+		end
+	end
+
+	local pulse = (math.sin(t * 6) + 1) / 2
+	local active = state == "active"
+
+	-- Animated border + eye
+	strokeGrad.Rotation = (strokeGrad.Rotation + dt * (active and 260 or 50)) % 360
+	local lookSpeed = active and 3 or 1.2
+	iris.Position = UDim2.new(0.5, math.sin(t * lookSpeed) * 9, 0.5, math.cos(t * lookSpeed * 0.7) * 2)
+
+	-- Edge glow eases in and out
+	edgeStrength += ((active and 1 or 0) - edgeStrength) * math.min(dt * 6, 1)
+	for _, e in ipairs(edges) do
+		e.BackgroundTransparency = 1 - edgeStrength * (0.22 + pulse * 0.08)
+	end
+
+	if active then
+		local rem = endsAt - t
+		local frac = math.clamp(rem / DURATION, 0, 1)
+		barFill.Size = UDim2.fromScale(frac, 1)
+		bannerFill.Size = UDim2.fromScale(frac, 1)
+		bannerTime.Text = ("%.1fs"):format(rem)
+		liveDot.BackgroundTransparency = pulse * 0.7
+
+		local n = 0
+		for _ in pairs(targets) do
+			n += 1
+		end
+		bannerSub.Text = n == 1 and "1 target revealed" or (n .. " targets revealed")
+	elseif state == "cooling" then
+		local rem = readyAt - t
+		setCooldownFill(rem / COOLDOWN)
+		cdText.Text = rem >= 10 and tostring(math.ceil(rem)) or ("%.1f"):format(rem)
+		barFill.Size = UDim2.fromScale(math.clamp(1 - rem / COOLDOWN, 0, 1), 1)
+	end
+
+	-- Update tags ~10x per second
+	if espOn and t - lastTagUpdate > 0.1 then
+		lastTagUpdate = t
+		local char = player.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		local origin = root and root.Position or workspace.CurrentCamera.CFrame.Position
+		for _, info in pairs(targets) do
+			if info.head.Parent then
+				info.dist.Text = ("%dm"):format(math.floor((info.head.Position - origin).Magnitude + 0.5))
+				local maxHp = info.humanoid.MaxHealth
+				local hp = maxHp > 0 and math.clamp(info.humanoid.Health / maxHp, 0, 1) or 0
+				info.hpFill.Size = UDim2.fromScale(hp, 1)
+				info.hpFill.BackgroundColor3 = THEME.Danger:Lerp(THEME.Good, hp)
+			end
+		end
+	end
+end)
