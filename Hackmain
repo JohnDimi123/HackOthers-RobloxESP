@@ -1,17 +1,19 @@
 --[[
-	Hack Others — ESP Superpower (single script)
+	Hack Others — Superpowers: ESP + Aimbot (single script)
 	Place in: StarterPlayer > StarterPlayerScripts  (as a LocalScript)
 
 	Controls
-	  Q  (or gamepad Y)  – turn ESP on / off
-	  M                  – open / close the ESP menu
-	  Eye button (bottom-right) – open / close the menu (works on mobile)
+	  Q  (gamepad Y)        – ESP on / off
+	  X  (gamepad X)        – Aimbot on / off
+	  Hold right-click      – aim (gamepad: hold L2). Can be switched to
+	                          "always aim" in the menu. On phones it always aims.
+	  M  / eye button       – open / close the superpowers menu
 
-	ESP stays on until you turn it off. No timer, no cooldown.
+	Both powers stay on until you turn them off. No timer, no cooldown.
 
-	To lock the power for a player, set on the server:
-	  player:SetAttribute("HasESP", false)   -- hides the button, turns ESP off
-	  player:SetAttribute("HasESP", true)    -- gives it back
+	To lock a power for a player, set on the server:
+	  player:SetAttribute("HasESP", false)       player:SetAttribute("HasAimbot", false)
+	Set back to true to give it again.
 ]]
 
 local Players = game:GetService("Players")
@@ -24,8 +26,10 @@ local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
 -- Keybinds --------------------------------------------------------------------
-local TOGGLE_KEY = Enum.KeyCode.Q
-local GAMEPAD_TOGGLE = Enum.KeyCode.ButtonY
+local ESP_KEY = Enum.KeyCode.Q
+local ESP_PAD = Enum.KeyCode.ButtonY
+local AIM_KEY = Enum.KeyCode.X
+local AIM_PAD = Enum.KeyCode.ButtonX
 local MENU_KEY = Enum.KeyCode.M
 
 -- Default settings (all changeable in the menu) --------------------------------
@@ -38,9 +42,9 @@ local SWATCHES = {
 	Color3.fromRGB(255, 255, 255),
 }
 
-local MIN_RANGE, MAX_RANGE = 50, 2000 -- slider at max = unlimited
+local MIN_RANGE, MAX_RANGE = 50, 2000 -- ESP range slider; max = unlimited
 
-local Settings = {
+local Settings = { -- ESP
 	Enabled = false,
 	Outline = true,
 	Fill = true,
@@ -52,6 +56,18 @@ local Settings = {
 	UseTeamColors = true,
 	Color = SWATCHES[1],
 	MaxDistance = MAX_RANGE,
+}
+
+local Aim = { -- Aimbot
+	Enabled = false,
+	Hold = true,        -- only aim while holding right-click / L2
+	WallCheck = true,   -- ignore players behind walls
+	Teammates = false,  -- aim at teammates too
+	Part = "Head",      -- "Head" or "Body"
+	FOV = 150,          -- radius in pixels
+	Smoothness = 0.35,  -- 0 = instant snap, 0.9 = very smooth
+	ShowFOV = true,
+	ShowMarker = true,
 }
 
 local THEME = {
@@ -107,6 +123,10 @@ local function hasESP()
 	return player:GetAttribute("HasESP") ~= false
 end
 
+local function hasAimbot()
+	return player:GetAttribute("HasAimbot") ~= false
+end
+
 local rotating = {} -- gradient borders that spin
 local irises = {}   -- eye icons that look around
 
@@ -139,7 +159,7 @@ local function makeEye(parent, w, h, z)
 		Parent = iris,
 	}, { pill() })
 	table.insert(irises, { iris = iris, range = w * 0.17 })
-	return eye, stroke, iris
+	return eye
 end
 
 local function spinningStroke(parent, thickness)
@@ -165,7 +185,7 @@ end
 -- Root GUI + effects
 --------------------------------------------------------------------------------
 local gui = make("ScreenGui", {
-	Name = "HackOthersESP",
+	Name = "HackOthersSuperpowers",
 	ResetOnSpawn = false,
 	IgnoreGuiInset = true,
 	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
@@ -198,54 +218,85 @@ local scan = make("Frame", {
 	}),
 })
 
--- "ESP ON" status pill (top-center) ---------------------------------------------
-local PILL_SHOWN = UDim2.new(0.5, 0, 0, 68)
-local PILL_HIDDEN = UDim2.new(0.5, 0, 0, -50)
+local function playOnFX(color)
+	flash.BackgroundColor3 = color
+	scan.BackgroundColor3 = color
+	flash.BackgroundTransparency = 0.78
+	tween(flash, 0.7, { BackgroundTransparency = 1 })
+	scan.Position = UDim2.fromScale(0, 0)
+	scan.BackgroundTransparency = 0
+	tween(scan, 0.75, { Position = UDim2.fromScale(0, 1) }, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+		.Completed:Connect(function()
+			scan.BackgroundTransparency = 1
+		end)
+end
 
-local statusPill = make("Frame", {
-	AnchorPoint = Vector2.new(0.5, 0),
-	Position = PILL_HIDDEN,
-	Size = UDim2.fromOffset(180, 34),
-	BackgroundColor3 = Color3.new(1, 1, 1),
-	Parent = gui,
-}, {
-	pill(),
-	make("UIGradient", { Rotation = 90, Color = ColorSequence.new(THEME.PanelHi, THEME.Panel) }),
-	make("UIStroke", { Color = THEME.Accent, Thickness = 1.5, Transparency = 0.3 }),
-})
+-- Status pills (top-center, stack when both powers are on) ----------------------
+local PILL_Y, PILL_GAP, PILL_HIDDEN_Y = 68, 42, -50
+local pills = {}
 
-local pillDot = make("Frame", {
-	AnchorPoint = Vector2.new(0, 0.5),
-	Position = UDim2.new(0, 14, 0.5, 0),
-	Size = UDim2.fromOffset(8, 8),
-	BackgroundColor3 = THEME.Accent,
-	Parent = statusPill,
-}, { pill() })
+local function makeStatusPill(title, color)
+	local frame = make("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, PILL_HIDDEN_Y),
+		Size = UDim2.fromOffset(230, 34),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		Parent = gui,
+	}, {
+		pill(),
+		make("UIGradient", { Rotation = 90, Color = ColorSequence.new(THEME.PanelHi, THEME.Panel) }),
+		make("UIStroke", { Color = color, Thickness = 1.5, Transparency = 0.3 }),
+	})
+	local dot = make("Frame", {
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 14, 0.5, 0),
+		Size = UDim2.fromOffset(8, 8),
+		BackgroundColor3 = color,
+		Parent = frame,
+	}, { pill() })
+	make("TextLabel", {
+		Position = UDim2.fromOffset(30, 0),
+		Size = UDim2.new(0, 100, 1, 0),
+		BackgroundTransparency = 1,
+		Text = title,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 14,
+		TextColor3 = color,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = frame,
+	})
+	local info = make("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -14, 0, 0),
+		Size = UDim2.new(0, 100, 1, 0),
+		BackgroundTransparency = 1,
+		Text = "",
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+		TextColor3 = THEME.Muted,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Parent = frame,
+	})
+	local p = { frame = frame, dot = dot, info = info, on = false }
+	table.insert(pills, p)
+	return p
+end
 
-make("TextLabel", {
-	Position = UDim2.fromOffset(30, 0),
-	Size = UDim2.new(0, 70, 1, 0),
-	BackgroundTransparency = 1,
-	Text = "ESP ON",
-	Font = Enum.Font.GothamBlack,
-	TextSize = 14,
-	TextColor3 = THEME.Accent,
-	TextXAlignment = Enum.TextXAlignment.Left,
-	Parent = statusPill,
-})
+local function layoutPills()
+	local y = PILL_Y
+	for _, p in ipairs(pills) do
+		if p.on then
+			tween(p.frame, 0.45, { Position = UDim2.new(0.5, 0, 0, y) }, Enum.EasingStyle.Back)
+			y += PILL_GAP
+		else
+			tween(p.frame, 0.3, { Position = UDim2.new(0.5, 0, 0, PILL_HIDDEN_Y) }, Enum.EasingStyle.Back, Enum.EasingDirection.In)
+		end
+	end
+end
 
-local pillCount = make("TextLabel", {
-	AnchorPoint = Vector2.new(1, 0),
-	Position = UDim2.new(1, -14, 0, 0),
-	Size = UDim2.new(0, 80, 1, 0),
-	BackgroundTransparency = 1,
-	Text = "0 seen",
-	Font = Enum.Font.GothamMedium,
-	TextSize = 12,
-	TextColor3 = THEME.Muted,
-	TextXAlignment = Enum.TextXAlignment.Right,
-	Parent = statusPill,
-})
+local espPill = makeStatusPill("ESP ON", THEME.Accent)
+local aimPill = makeStatusPill("AIMBOT ON", THEME.Danger)
 
 --------------------------------------------------------------------------------
 -- Launcher button (bottom-right) — opens the menu
@@ -326,6 +377,11 @@ end)
 launcher.MouseButton1Up:Connect(function()
 	tween(launcherScale, 0.25, { Scale = launcherHover and 1.08 or 1 }, Enum.EasingStyle.Back)
 end)
+
+local function popLauncher()
+	launcherScale.Scale = 1.18
+	tween(launcherScale, 0.45, { Scale = launcherHover and 1.08 or 1 }, Enum.EasingStyle.Back)
+end
 
 --------------------------------------------------------------------------------
 -- ESP core
@@ -573,15 +629,158 @@ local function setESP(on)
 end
 
 --------------------------------------------------------------------------------
+-- Aimbot core
+--------------------------------------------------------------------------------
+local aimTarget = nil -- Player currently locked on
+
+local fovStroke = make("UIStroke", { Color = THEME.Accent, Thickness = 1.5, Transparency = 0.35 })
+local fovCircle = make("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Size = UDim2.fromOffset(Aim.FOV * 2, Aim.FOV * 2),
+	BackgroundTransparency = 1,
+	Visible = false,
+	Parent = gui,
+}, { pill(), fovStroke })
+
+local markerStroke = make("UIStroke", { Color = THEME.Danger, Thickness = 2 })
+local marker = make("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Size = UDim2.fromOffset(26, 26),
+	BackgroundTransparency = 1,
+	Rotation = 45,
+	Visible = false,
+	Parent = gui,
+}, { corner(5), markerStroke })
+local markerDot = make("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromOffset(6, 6),
+	BackgroundColor3 = THEME.Danger,
+	Parent = marker,
+}, { pill() })
+
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+local function aimPart(char)
+	if Aim.Part == "Head" then
+		return char:FindFirstChild("Head")
+	end
+	return char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso") or char:FindFirstChild("HumanoidRootPart")
+end
+
+local function aimOrigin(cam)
+	if UserInputService.MouseEnabled and UserInputService.MouseBehavior == Enum.MouseBehavior.Default then
+		return UserInputService:GetMouseLocation()
+	end
+	return cam.ViewportSize / 2
+end
+
+local function isAimHeld()
+	if not Aim.Hold then return true end
+	if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return true end
+	if UserInputService:IsGamepadButtonDown(Enum.UserInputType.Gamepad1, Enum.KeyCode.ButtonL2) then return true end
+	if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then return true end -- phones
+	return false
+end
+
+-- Returns the part to aim at and its screen distance from the aim origin
+local function checkTarget(plr, cam, origin)
+	if plr == player then return nil end
+	local char = plr.Character
+	if not char then return nil end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.Health <= 0 then return nil end
+	if not Aim.Teammates and plr.Team and plr.Team == player.Team then return nil end
+	local part = aimPart(char)
+	if not part then return nil end
+
+	local sp, onScreen = cam:WorldToViewportPoint(part.Position)
+	if not onScreen then return nil end
+	local d = (Vector2.new(sp.X, sp.Y) - origin).Magnitude
+
+	if Aim.WallCheck then
+		local ignore = { char }
+		if player.Character then
+			table.insert(ignore, player.Character)
+		end
+		rayParams.FilterDescendantsInstances = ignore
+		local from = cam.CFrame.Position
+		if workspace:Raycast(from, part.Position - from, rayParams) then
+			return nil
+		end
+	end
+	return part, d, Vector2.new(sp.X, sp.Y)
+end
+
+local aimOn = false
+
+RunService:BindToRenderStep("HackOthersAimbot", Enum.RenderPriority.Camera.Value + 1, function(dt)
+	if not aimOn then
+		fovCircle.Visible = false
+		marker.Visible = false
+		aimTarget = nil
+		return
+	end
+
+	local cam = workspace.CurrentCamera
+	local origin = aimOrigin(cam)
+	local holding = isAimHeld()
+
+	fovCircle.Visible = Aim.ShowFOV
+	fovCircle.Position = UDim2.fromOffset(origin.X, origin.Y)
+	fovCircle.Size = UDim2.fromOffset(Aim.FOV * 2, Aim.FOV * 2)
+
+	-- Keep the current target while it stays valid (stops flicker between players)
+	local bestPlr, bestPart, bestD, bestScreen
+	if aimTarget then
+		local part, d, screen = checkTarget(aimTarget, cam, origin)
+		if part and d <= Aim.FOV * 1.3 then
+			bestPlr, bestPart, bestD, bestScreen = aimTarget, part, d, screen
+		end
+	end
+	if not bestPlr then
+		for _, plr in ipairs(Players:GetPlayers()) do
+			local part, d, screen = checkTarget(plr, cam, origin)
+			if part and d <= Aim.FOV and (not bestD or d < bestD) then
+				bestPlr, bestPart, bestD, bestScreen = plr, part, d, screen
+			end
+		end
+	end
+	aimTarget = bestPlr
+
+	local lockColor = holding and THEME.Danger or THEME.Muted
+	fovStroke.Color = bestPlr and lockColor or THEME.Accent
+
+	if bestPart then
+		marker.Visible = Aim.ShowMarker
+		marker.Position = UDim2.fromOffset(bestScreen.X, bestScreen.Y)
+		markerStroke.Color = lockColor
+		markerDot.BackgroundColor3 = lockColor
+		aimPill.info.Text = (holding and "Locked: " or "Target: ") .. bestPlr.DisplayName
+
+		if holding then
+			local camPos = cam.CFrame.Position
+			local goal = CFrame.lookAt(camPos, bestPart.Position)
+			local alpha = 1 - (Aim.Smoothness ^ (dt * 60))
+			cam.CFrame = cam.CFrame:Lerp(goal, alpha)
+		end
+	else
+		marker.Visible = false
+		aimPill.info.Text = "No target"
+	end
+end)
+
+--------------------------------------------------------------------------------
 -- Menu
 --------------------------------------------------------------------------------
-local setEnabled -- defined below
+local setESPEnabled, setAimEnabled -- defined below
 
 local menu = make("Frame", {
 	Name = "Menu",
 	AnchorPoint = Vector2.new(1, 1),
 	Position = UDim2.new(1, -28, 1, -108),
-	Size = UDim2.new(0, 320, 0.7, 0),
+	Size = UDim2.new(0, 320, 0.72, 0),
 	BackgroundColor3 = Color3.new(1, 1, 1),
 	Visible = false,
 	Active = true,
@@ -590,7 +789,7 @@ local menu = make("Frame", {
 	corner(18),
 	make("UIGradient", { Rotation = 90, Color = ColorSequence.new(Color3.fromRGB(22, 26, 36), THEME.Panel) }),
 	make("UIStroke", { Color = THEME.Line, Thickness = 1.5 }),
-	make("UISizeConstraint", { MaxSize = Vector2.new(320, 600), MinSize = Vector2.new(0, 260) }),
+	make("UISizeConstraint", { MaxSize = Vector2.new(320, 620), MinSize = Vector2.new(0, 300) }),
 })
 local menuScale = make("UIScale", { Parent = menu })
 
@@ -614,9 +813,9 @@ make("TextLabel", {
 	Position = UDim2.fromOffset(66, 12),
 	Size = UDim2.new(1, -120, 0, 22),
 	BackgroundTransparency = 1,
-	Text = "ESP",
+	Text = "HACK OTHERS",
 	Font = Enum.Font.GothamBlack,
-	TextSize = 20,
+	TextSize = 18,
 	TextColor3 = THEME.Text,
 	TextXAlignment = Enum.TextXAlignment.Left,
 	Parent = header,
@@ -626,7 +825,7 @@ make("TextLabel", {
 	Position = UDim2.fromOffset(66, 34),
 	Size = UDim2.new(1, -120, 0, 16),
 	BackgroundTransparency = 1,
-	Text = "Hack others · superpower",
+	Text = "Superpowers",
 	Font = Enum.Font.GothamMedium,
 	TextSize = 12,
 	TextColor3 = THEME.Muted,
@@ -653,41 +852,83 @@ closeBtn.MouseLeave:Connect(function()
 	tween(closeBtn, 0.15, { TextColor3 = THEME.Muted })
 end)
 
-make("Frame", {
-	Position = UDim2.fromOffset(16, 64),
-	Size = UDim2.new(1, -32, 0, 1),
-	BackgroundColor3 = THEME.Line,
-	BorderSizePixel = 0,
+-- Tabs ----------------------------------------------------------------------------
+local tabBar = make("Frame", {
+	Position = UDim2.fromOffset(16, 66),
+	Size = UDim2.new(1, -32, 0, 36),
+	BackgroundColor3 = THEME.Row,
 	Parent = menu,
-})
+}, { corner(10) })
 
-local content = make("ScrollingFrame", {
-	Position = UDim2.fromOffset(0, 65),
-	Size = UDim2.new(1, 0, 1, -101),
-	BackgroundTransparency = 1,
-	BorderSizePixel = 0,
-	ScrollBarThickness = 3,
-	ScrollBarImageColor3 = THEME.Accent,
-	CanvasSize = UDim2.new(),
-	AutomaticCanvasSize = Enum.AutomaticSize.Y,
-	ScrollingDirection = Enum.ScrollingDirection.Y,
-	Parent = menu,
-}, {
-	make("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }),
-	make("UIPadding", {
-		PaddingLeft = UDim.new(0, 14),
-		PaddingRight = UDim.new(0, 14),
-		PaddingTop = UDim.new(0, 12),
-		PaddingBottom = UDim.new(0, 12),
-	}),
-})
+local tabIndicator = make("Frame", {
+	Position = UDim2.new(0, 3, 0, 3),
+	Size = UDim2.new(0.5, -4, 1, -6),
+	BackgroundColor3 = Color3.new(1, 1, 1),
+	Parent = tabBar,
+}, { corner(8), make("UIGradient", { Color = ColorSequence.new(THEME.Accent, THEME.Accent2) }) })
+
+local function makePage()
+	return make("ScrollingFrame", {
+		Position = UDim2.fromOffset(0, 110),
+		Size = UDim2.new(1, 0, 1, -146),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		ScrollBarThickness = 3,
+		ScrollBarImageColor3 = THEME.Accent,
+		CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollingDirection = Enum.ScrollingDirection.Y,
+		Visible = false,
+		Parent = menu,
+	}, {
+		make("UIListLayout", { Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder }),
+		make("UIPadding", {
+			PaddingLeft = UDim.new(0, 14),
+			PaddingRight = UDim.new(0, 14),
+			PaddingTop = UDim.new(0, 6),
+			PaddingBottom = UDim.new(0, 12),
+		}),
+	})
+end
+
+local pages = { makePage(), makePage() }
+local tabButtons = {}
+local currentTab = 1
+
+local function setTab(i)
+	currentTab = i
+	for idx, page in ipairs(pages) do
+		page.Visible = idx == i
+		tween(tabButtons[idx], 0.2, { TextColor3 = idx == i and THEME.Panel or THEME.Muted })
+	end
+	tween(tabIndicator, 0.3, { Position = UDim2.new((i - 1) * 0.5, i == 1 and 3 or 1, 0, 3) }, Enum.EasingStyle.Back)
+end
+
+for i, name in ipairs({ "ESP", "AIMBOT" }) do
+	local b = make("TextButton", {
+		Text = name,
+		AutoButtonColor = false,
+		BackgroundTransparency = 1,
+		Position = UDim2.fromScale((i - 1) * 0.5, 0),
+		Size = UDim2.fromScale(0.5, 1),
+		Font = Enum.Font.GothamBlack,
+		TextSize = 13,
+		TextColor3 = THEME.Muted,
+		ZIndex = 2,
+		Parent = tabBar,
+	})
+	tabButtons[i] = b
+	b.Activated:Connect(function()
+		setTab(i)
+	end)
+end
 
 make("TextLabel", {
 	Position = UDim2.new(0, 0, 1, -36),
 	Size = UDim2.new(1, 0, 0, 36),
 	BackgroundTransparency = 1,
 	Text = UserInputService.KeyboardEnabled
-		and (TOGGLE_KEY.Name .. "  toggle ESP    ·    " .. MENU_KEY.Name .. "  menu")
+		and (ESP_KEY.Name .. " ESP   ·   " .. AIM_KEY.Name .. " Aimbot   ·   " .. MENU_KEY.Name .. " Menu")
 		or "Tap the eye button to open this menu",
 	Font = Enum.Font.GothamMedium,
 	TextSize = 12,
@@ -695,13 +936,14 @@ make("TextLabel", {
 	Parent = menu,
 })
 
+-- Building blocks (they add to whichever page `content` points at) -------------
+local content = pages[1]
 local order = 0
 local function nextOrder()
 	order += 1
 	return order
 end
 
--- Switch component
 local function makeSwitch(parent, w, h, position, anchor)
 	local track = make("Frame", {
 		AnchorPoint = anchor,
@@ -749,39 +991,48 @@ local function section(text)
 	})
 end
 
-local function toggleRow(label, key, onChange)
+local function rowBase(height)
 	local row = make("TextButton", {
 		Text = "",
 		AutoButtonColor = false,
-		Size = UDim2.new(1, 0, 0, 42),
+		Size = UDim2.new(1, 0, 0, height or 42),
 		BackgroundColor3 = THEME.Row,
 		BackgroundTransparency = 0.3,
 		LayoutOrder = nextOrder(),
 		Parent = content,
 	}, { corner(10) })
-	make("TextLabel", {
-		Position = UDim2.fromOffset(14, 0),
-		Size = UDim2.new(1, -80, 1, 0),
-		BackgroundTransparency = 1,
-		Text = label,
-		Font = Enum.Font.GothamBold,
-		TextSize = 14,
-		TextColor3 = THEME.Text,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		Parent = row,
-	})
-	local sw = makeSwitch(row, 40, 22, UDim2.new(1, -14, 0.5, 0), Vector2.new(1, 0.5))
-	sw.set(Settings[key], true)
-
 	row.MouseEnter:Connect(function()
 		tween(row, 0.15, { BackgroundTransparency = 0 })
 	end)
 	row.MouseLeave:Connect(function()
 		tween(row, 0.15, { BackgroundTransparency = 0.3 })
 	end)
+	return row
+end
+
+local function rowLabel(row, text, widthCut)
+	make("TextLabel", {
+		Position = UDim2.fromOffset(14, 0),
+		Size = UDim2.new(1, -(widthCut or 80), 1, 0),
+		BackgroundTransparency = 1,
+		Text = text,
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+		TextColor3 = THEME.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Parent = row,
+	})
+end
+
+local function toggleRow(label, tbl, key, onChange)
+	local row = rowBase()
+	rowLabel(row, label)
+	local sw = makeSwitch(row, 40, 22, UDim2.new(1, -14, 0.5, 0), Vector2.new(1, 0.5))
+	sw.set(tbl[key], true)
 	row.Activated:Connect(function()
-		Settings[key] = not Settings[key]
-		sw.set(Settings[key])
+		tbl[key] = not tbl[key]
+		sw.set(tbl[key])
 		if onChange then
 			onChange()
 		end
@@ -789,76 +1040,222 @@ local function toggleRow(label, key, onChange)
 	return sw
 end
 
--- Master ESP card ---------------------------------------------------------------
-local master = make("TextButton", {
-	Text = "",
-	AutoButtonColor = false,
-	Size = UDim2.new(1, 0, 0, 76),
-	BackgroundColor3 = Color3.new(1, 1, 1),
-	LayoutOrder = nextOrder(),
-	Parent = content,
-}, {
-	corner(14),
-	make("UIGradient", { Rotation = 0, Color = ColorSequence.new(THEME.PanelHi, THEME.Row) }),
-})
-spinningStroke(master, 1.5)
-local masterScale = make("UIScale", { Parent = master })
+local function segmentedRow(label, options, tbl, key)
+	local row = rowBase()
+	rowLabel(row, label, 150)
+	local holder = make("Frame", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -10, 0.5, 0),
+		Size = UDim2.fromOffset(130, 28),
+		BackgroundColor3 = THEME.Track,
+		Parent = row,
+	}, { corner(8) })
+	local count = #options
+	local indicator = make("Frame", {
+		Position = UDim2.new(0, 2, 0, 2),
+		Size = UDim2.new(1 / count, -4, 1, -4),
+		BackgroundColor3 = THEME.Accent,
+		Parent = holder,
+	}, { corner(6) })
+	local buttons = {}
+	local function refresh(instant)
+		for i, opt in ipairs(options) do
+			local active = tbl[key] == opt
+			buttons[i].TextColor3 = active and THEME.Panel or THEME.Muted
+			if active then
+				local pos = UDim2.new((i - 1) / count, 2, 0, 2)
+				if instant then
+					indicator.Position = pos
+				else
+					tween(indicator, 0.25, { Position = pos }, Enum.EasingStyle.Back)
+				end
+			end
+		end
+	end
+	for i, opt in ipairs(options) do
+		buttons[i] = make("TextButton", {
+			Text = opt,
+			AutoButtonColor = false,
+			BackgroundTransparency = 1,
+			Position = UDim2.fromScale((i - 1) / count, 0),
+			Size = UDim2.fromScale(1 / count, 1),
+			Font = Enum.Font.GothamBold,
+			TextSize = 12,
+			ZIndex = 2,
+			Parent = holder,
+		})
+		buttons[i].Activated:Connect(function()
+			tbl[key] = opt
+			refresh(false)
+		end)
+	end
+	refresh(true)
+end
 
-make("TextLabel", {
-	Position = UDim2.fromOffset(16, 13),
-	Size = UDim2.new(1, -96, 0, 26),
-	BackgroundTransparency = 1,
-	Text = "ESP",
-	Font = Enum.Font.GothamBlack,
-	TextSize = 22,
-	TextColor3 = THEME.Text,
-	TextXAlignment = Enum.TextXAlignment.Left,
-	Parent = master,
-})
+local activeSlider = nil
+local function makeSlider(label, minV, maxV, value, format, onChange)
+	local card = make("Frame", {
+		Size = UDim2.new(1, 0, 0, 60),
+		BackgroundColor3 = THEME.Row,
+		BackgroundTransparency = 0.3,
+		LayoutOrder = nextOrder(),
+		Parent = content,
+	}, { corner(10) })
 
-local masterSub = make("TextLabel", {
-	Position = UDim2.fromOffset(16, 42),
-	Size = UDim2.new(1, -96, 0, 18),
-	BackgroundTransparency = 1,
-	Text = "Off · tap to reveal everyone",
-	Font = Enum.Font.GothamMedium,
-	TextSize = 12,
-	TextColor3 = THEME.Muted,
-	TextXAlignment = Enum.TextXAlignment.Left,
-	TextTruncate = Enum.TextTruncate.AtEnd,
-	Parent = master,
-})
+	make("TextLabel", {
+		Position = UDim2.fromOffset(14, 8),
+		Size = UDim2.new(0.6, 0, 0, 18),
+		BackgroundTransparency = 1,
+		Text = label,
+		Font = Enum.Font.GothamBold,
+		TextSize = 14,
+		TextColor3 = THEME.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = card,
+	})
 
-local masterSwitch = makeSwitch(master, 56, 30, UDim2.new(1, -16, 0.5, 0), Vector2.new(1, 0.5))
-masterSwitch.set(false, true)
+	local valueLabel = make("TextLabel", {
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -14, 0, 8),
+		Size = UDim2.new(0.4, 0, 0, 18),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		TextSize = 13,
+		TextColor3 = THEME.Accent,
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Parent = card,
+	})
 
-master.MouseButton1Down:Connect(function()
-	tween(masterScale, 0.1, { Scale = 0.97 })
+	local track = make("Frame", {
+		Position = UDim2.new(0, 14, 0, 40),
+		Size = UDim2.new(1, -28, 0, 6),
+		BackgroundColor3 = THEME.Track,
+		BorderSizePixel = 0,
+		Parent = card,
+	}, { pill() })
+
+	local fill = make("Frame", {
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BorderSizePixel = 0,
+		Parent = track,
+	}, { pill(), make("UIGradient", { Color = ColorSequence.new(THEME.Accent, THEME.Accent2) }) })
+
+	local knob = make("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Size = UDim2.fromOffset(16, 16),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		ZIndex = 2,
+		Parent = track,
+	}, { pill(), make("UIStroke", { Color = THEME.Accent, Thickness = 2 }) })
+
+	local hit = make("TextButton", {
+		Text = "",
+		BackgroundTransparency = 1,
+		Position = UDim2.new(0, 6, 0, 28),
+		Size = UDim2.new(1, -12, 0, 30),
+		ZIndex = 3,
+		Parent = card,
+	})
+
+	local s = { track = track, knob = knob, page = content }
+	function s.setFraction(f)
+		f = math.clamp(f, 0, 1)
+		local v = minV + (maxV - minV) * f
+		fill.Size = UDim2.fromScale(f, 1)
+		knob.Position = UDim2.fromScale(f, 0.5)
+		valueLabel.Text = format(v)
+		onChange(v)
+	end
+	function s.slideTo(x)
+		s.setFraction((x - track.AbsolutePosition.X) / track.AbsoluteSize.X)
+	end
+
+	hit.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			activeSlider = s
+			s.page.ScrollingEnabled = false
+			tween(knob, 0.15, { Size = UDim2.fromOffset(20, 20) })
+			s.slideTo(input.Position.X)
+		end
+	end)
+
+	s.setFraction((value - minV) / (maxV - minV))
+	return s
+end
+
+local function powerCard(title, onClick)
+	local card = make("TextButton", {
+		Text = "",
+		AutoButtonColor = false,
+		Size = UDim2.new(1, 0, 0, 76),
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		LayoutOrder = nextOrder(),
+		Parent = content,
+	}, {
+		corner(14),
+		make("UIGradient", { Rotation = 0, Color = ColorSequence.new(THEME.PanelHi, THEME.Row) }),
+	})
+	spinningStroke(card, 1.5)
+	local scale = make("UIScale", { Parent = card })
+
+	make("TextLabel", {
+		Position = UDim2.fromOffset(16, 13),
+		Size = UDim2.new(1, -96, 0, 26),
+		BackgroundTransparency = 1,
+		Text = title,
+		Font = Enum.Font.GothamBlack,
+		TextSize = 22,
+		TextColor3 = THEME.Text,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = card,
+	})
+
+	local sub = make("TextLabel", {
+		Position = UDim2.fromOffset(16, 42),
+		Size = UDim2.new(1, -96, 0, 18),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+		TextColor3 = THEME.Muted,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Parent = card,
+	})
+
+	local sw = makeSwitch(card, 56, 30, UDim2.new(1, -16, 0.5, 0), Vector2.new(1, 0.5))
+	sw.set(false, true)
+
+	card.MouseButton1Down:Connect(function()
+		tween(scale, 0.1, { Scale = 0.97 })
+	end)
+	card.MouseButton1Up:Connect(function()
+		tween(scale, 0.25, { Scale = 1 }, Enum.EasingStyle.Back)
+	end)
+	card.MouseLeave:Connect(function()
+		tween(scale, 0.2, { Scale = 1 })
+	end)
+	card.Activated:Connect(onClick)
+	return sw, sub
+end
+
+-- ESP page --------------------------------------------------------------------
+content = pages[1]
+
+local espSwitch, espSub = powerCard("ESP", function()
+	setESPEnabled(not Settings.Enabled)
 end)
-master.MouseButton1Up:Connect(function()
-	tween(masterScale, 0.25, { Scale = 1 }, Enum.EasingStyle.Back)
-end)
-master.MouseLeave:Connect(function()
-	tween(masterScale, 0.2, { Scale = 1 })
-end)
-master.Activated:Connect(function()
-	setEnabled(not Settings.Enabled)
-end)
 
--- Visuals -----------------------------------------------------------------------
 section("VISUALS")
-toggleRow("Outline", "Outline", restyleAll)
-toggleRow("Body glow", "Fill", restyleAll)
-toggleRow("Names", "Names", restyleAll)
-toggleRow("Distance", "Distance", restyleAll)
-toggleRow("Health bar", "Health", restyleAll)
+toggleRow("Outline", Settings, "Outline", restyleAll)
+toggleRow("Body glow", Settings, "Fill", restyleAll)
+toggleRow("Names", Settings, "Names", restyleAll)
+toggleRow("Distance", Settings, "Distance", restyleAll)
+toggleRow("Health bar", Settings, "Health", restyleAll)
 
--- Targets -----------------------------------------------------------------------
 section("TARGETS")
-toggleRow("Show teammates", "Teammates", rebuild)
-toggleRow("Use team colors", "UseTeamColors", restyleAll)
+toggleRow("Show teammates", Settings, "Teammates", rebuild)
+toggleRow("Use team colors", Settings, "UseTeamColors", restyleAll)
 
--- Color -------------------------------------------------------------------------
 section("COLOR  ·  used when team colors are off")
 local swatchRow = make("Frame", {
 	Size = UDim2.new(1, 0, 0, 40),
@@ -912,97 +1309,45 @@ for i, color in ipairs(SWATCHES) do
 end
 refreshSwatches()
 
--- Range slider ------------------------------------------------------------------
 section("RANGE")
-local sliderCard = make("Frame", {
-	Size = UDim2.new(1, 0, 0, 60),
-	BackgroundColor3 = THEME.Row,
-	BackgroundTransparency = 0.3,
-	LayoutOrder = nextOrder(),
-	Parent = content,
-}, { corner(10) })
-
-make("TextLabel", {
-	Position = UDim2.fromOffset(14, 8),
-	Size = UDim2.new(0.6, 0, 0, 18),
-	BackgroundTransparency = 1,
-	Text = "Max distance",
-	Font = Enum.Font.GothamBold,
-	TextSize = 14,
-	TextColor3 = THEME.Text,
-	TextXAlignment = Enum.TextXAlignment.Left,
-	Parent = sliderCard,
-})
-
-local rangeValue = make("TextLabel", {
-	AnchorPoint = Vector2.new(1, 0),
-	Position = UDim2.new(1, -14, 0, 8),
-	Size = UDim2.new(0.4, 0, 0, 18),
-	BackgroundTransparency = 1,
-	Text = "Unlimited",
-	Font = Enum.Font.GothamBold,
-	TextSize = 13,
-	TextColor3 = THEME.Accent,
-	TextXAlignment = Enum.TextXAlignment.Right,
-	Parent = sliderCard,
-})
-
-local sliderTrack = make("Frame", {
-	Position = UDim2.new(0, 14, 0, 40),
-	Size = UDim2.new(1, -28, 0, 6),
-	BackgroundColor3 = THEME.Track,
-	BorderSizePixel = 0,
-	Parent = sliderCard,
-}, { pill() })
-
-local sliderFill = make("Frame", {
-	Size = UDim2.fromScale(1, 1),
-	BackgroundColor3 = Color3.new(1, 1, 1),
-	BorderSizePixel = 0,
-	Parent = sliderTrack,
-}, { pill(), make("UIGradient", { Color = ColorSequence.new(THEME.Accent, THEME.Accent2) }) })
-
-local sliderKnob = make("Frame", {
-	AnchorPoint = Vector2.new(0.5, 0.5),
-	Position = UDim2.fromScale(1, 0.5),
-	Size = UDim2.fromOffset(16, 16),
-	BackgroundColor3 = Color3.new(1, 1, 1),
-	ZIndex = 2,
-	Parent = sliderTrack,
-}, { pill(), make("UIStroke", { Color = THEME.Accent, Thickness = 2 }) })
-
-local sliderHit = make("TextButton", {
-	Text = "",
-	BackgroundTransparency = 1,
-	Position = UDim2.new(0, 6, 0, 28),
-	Size = UDim2.new(1, -12, 0, 30),
-	ZIndex = 3,
-	Parent = sliderCard,
-})
-
-local function setRangeFraction(f)
-	f = math.clamp(f, 0, 1)
-	Settings.MaxDistance = math.floor(MIN_RANGE + (MAX_RANGE - MIN_RANGE) * f + 0.5)
-	sliderFill.Size = UDim2.fromScale(f, 1)
-	sliderKnob.Position = UDim2.fromScale(f, 0.5)
-	rangeValue.Text = Settings.MaxDistance >= MAX_RANGE and "Unlimited" or (Settings.MaxDistance .. "m")
-end
-setRangeFraction((Settings.MaxDistance - MIN_RANGE) / (MAX_RANGE - MIN_RANGE))
-
-local sliding = false
-local function slideTo(x)
-	setRangeFraction((x - sliderTrack.AbsolutePosition.X) / sliderTrack.AbsoluteSize.X)
-end
-sliderHit.InputBegan:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-		sliding = true
-		content.ScrollingEnabled = false
-		tween(sliderKnob, 0.15, { Size = UDim2.fromOffset(20, 20) })
-		slideTo(input.Position.X)
-	end
+makeSlider("Max distance", MIN_RANGE, MAX_RANGE, Settings.MaxDistance, function(v)
+	return v >= MAX_RANGE - 0.5 and "Unlimited" or (math.floor(v + 0.5) .. "m")
+end, function(v)
+	Settings.MaxDistance = math.floor(v + 0.5)
 end)
 
--- Menu dragging -----------------------------------------------------------------
+-- Aimbot page -----------------------------------------------------------------
+content = pages[2]
+
+local aimSwitch, aimSub = powerCard("AIMBOT", function()
+	setAimEnabled(not Aim.Enabled)
+end)
+
+section("AIMING")
+toggleRow("Only aim while holding right-click", Aim, "Hold")
+segmentedRow("Aim at", { "Head", "Body" }, Aim, "Part")
+toggleRow("Wall check", Aim, "WallCheck")
+toggleRow("Aim at teammates", Aim, "Teammates")
+
+section("FEEL")
+makeSlider("Lock-on radius", 40, 400, Aim.FOV, function(v)
+	return math.floor(v + 0.5) .. "px"
+end, function(v)
+	Aim.FOV = math.floor(v + 0.5)
+end)
+makeSlider("Smoothness", 0, 0.9, Aim.Smoothness, function(v)
+	return v < 0.01 and "Snap" or (math.floor(v / 0.9 * 100 + 0.5) .. "%")
+end, function(v)
+	Aim.Smoothness = v
+end)
+
+section("DISPLAY")
+toggleRow("Show lock-on circle", Aim, "ShowFOV")
+toggleRow("Show target marker", Aim, "ShowMarker")
+
+setTab(1)
+
+-- Menu dragging + slider dragging ----------------------------------------------
 local dragging, dragStart, startPos = false, nil, nil
 header.InputBegan:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
@@ -1016,8 +1361,8 @@ UserInputService.InputChanged:Connect(function(input)
 	local moving = input.UserInputType == Enum.UserInputType.MouseMovement
 		or input.UserInputType == Enum.UserInputType.Touch
 	if not moving then return end
-	if sliding then
-		slideTo(input.Position.X)
+	if activeSlider then
+		activeSlider.slideTo(input.Position.X)
 	elseif dragging then
 		local delta = input.Position - dragStart
 		menu.Position = UDim2.new(
@@ -1029,10 +1374,10 @@ end)
 
 UserInputService.InputEnded:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-		if sliding then
-			sliding = false
-			content.ScrollingEnabled = true
-			tween(sliderKnob, 0.15, { Size = UDim2.fromOffset(16, 16) })
+		if activeSlider then
+			activeSlider.page.ScrollingEnabled = true
+			tween(activeSlider.knob, 0.15, { Size = UDim2.fromOffset(16, 16) })
+			activeSlider = nil
 		end
 		dragging = false
 	end
@@ -1041,7 +1386,7 @@ end)
 -- Open / close ------------------------------------------------------------------
 local menuOpen = false
 local function setMenu(open)
-	if open and not hasESP() then return end
+	if open and not (hasESP() or hasAimbot()) then return end
 	menuOpen = open
 	if open then
 		menu.Visible = true
@@ -1065,53 +1410,78 @@ closeBtn.Activated:Connect(function()
 end)
 
 --------------------------------------------------------------------------------
--- Turning ESP on / off
+-- Turning powers on / off
 --------------------------------------------------------------------------------
-local function playOnFX()
-	flash.BackgroundTransparency = 0.75
-	tween(flash, 0.7, { BackgroundTransparency = 1 })
-
-	scan.Position = UDim2.fromScale(0, 0)
-	scan.BackgroundTransparency = 0
-	tween(scan, 0.75, { Position = UDim2.fromScale(0, 1) }, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
-		.Completed:Connect(function()
-			scan.BackgroundTransparency = 1
-		end)
-
-	tween(statusPill, 0.5, { Position = PILL_SHOWN }, Enum.EasingStyle.Back)
-	launcherScale.Scale = 1.18
-	tween(launcherScale, 0.45, { Scale = launcherHover and 1.08 or 1 }, Enum.EasingStyle.Back)
+local function refreshLauncher()
+	local any = Settings.Enabled or Aim.Enabled
+	tween(launcherDot, 0.2, { BackgroundColor3 = any and THEME.Good or THEME.Track })
+	if not any then
+		tween(launcherGlow, 0.3, { BackgroundTransparency = 1 })
+	end
 end
 
-local function playOffFX()
-	tween(statusPill, 0.35, { Position = PILL_HIDDEN }, Enum.EasingStyle.Back, Enum.EasingDirection.In)
-	tween(launcherGlow, 0.3, { BackgroundTransparency = 1 })
+local function refreshCardText()
+	if not hasESP() then
+		espSub.Text, espSub.TextColor3 = "Locked", THEME.Muted
+	else
+		espSub.Text = Settings.Enabled and "On · everyone is revealed" or "Off · reveal everyone through walls"
+		espSub.TextColor3 = Settings.Enabled and THEME.Accent or THEME.Muted
+	end
+	if not hasAimbot() then
+		aimSub.Text, aimSub.TextColor3 = "Locked", THEME.Muted
+	else
+		aimSub.Text = Aim.Enabled and "On · locks onto the nearest player" or "Off · auto-aim at other players"
+		aimSub.TextColor3 = Aim.Enabled and THEME.Danger or THEME.Muted
+	end
 end
 
-setEnabled = function(on)
+setESPEnabled = function(on)
 	if on and not hasESP() then return end
 	if on == Settings.Enabled then return end
 	Settings.Enabled = on
-	masterSwitch.set(on)
-	masterSub.Text = on and "On · everyone is revealed" or "Off · tap to reveal everyone"
-	masterSub.TextColor3 = on and THEME.Accent or THEME.Muted
-	tween(launcherDot, 0.2, { BackgroundColor3 = on and THEME.Good or THEME.Track })
+	espSwitch.set(on)
 	setESP(on)
+	espPill.on = on
+	layoutPills()
+	refreshCardText()
+	refreshLauncher()
 	if on then
-		playOnFX()
-	else
-		playOffFX()
+		playOnFX(THEME.Accent)
+		popLauncher()
+	end
+end
+
+setAimEnabled = function(on)
+	if on and not hasAimbot() then return end
+	if on == Aim.Enabled then return end
+	Aim.Enabled = on
+	aimOn = on
+	aimSwitch.set(on)
+	aimPill.on = on
+	layoutPills()
+	refreshCardText()
+	refreshLauncher()
+	if on then
+		playOnFX(THEME.Danger)
+		popLauncher()
 	end
 end
 
 ContextActionService:BindAction("HackOthers_ESPToggle", function(_, inputState)
 	if inputState == Enum.UserInputState.Begin then
-		setEnabled(not Settings.Enabled)
+		setESPEnabled(not Settings.Enabled)
 	end
 	return Enum.ContextActionResult.Sink
-end, false, TOGGLE_KEY, GAMEPAD_TOGGLE)
+end, false, ESP_KEY, ESP_PAD)
 
-ContextActionService:BindAction("HackOthers_ESPMenu", function(_, inputState)
+ContextActionService:BindAction("HackOthers_AimToggle", function(_, inputState)
+	if inputState == Enum.UserInputState.Begin then
+		setAimEnabled(not Aim.Enabled)
+	end
+	return Enum.ContextActionResult.Sink
+end, false, AIM_KEY, AIM_PAD)
+
+ContextActionService:BindAction("HackOthers_Menu", function(_, inputState)
 	if inputState == Enum.UserInputState.Begin then
 		setMenu(not menuOpen)
 	end
@@ -1119,30 +1489,38 @@ ContextActionService:BindAction("HackOthers_ESPMenu", function(_, inputState)
 end, false, MENU_KEY)
 
 local function refreshOwnership()
-	local owned = hasESP()
-	launcherHolder.Visible = owned
-	if not owned then
-		setEnabled(false)
+	if not hasESP() then
+		setESPEnabled(false)
+	end
+	if not hasAimbot() then
+		setAimEnabled(false)
+	end
+	local any = hasESP() or hasAimbot()
+	launcherHolder.Visible = any
+	if not any then
 		setMenu(false)
 	end
+	refreshCardText()
 end
 player:GetAttributeChangedSignal("HasESP"):Connect(refreshOwnership)
+player:GetAttributeChangedSignal("HasAimbot"):Connect(refreshOwnership)
 refreshOwnership()
 
 --------------------------------------------------------------------------------
--- Main loop
+-- Main loop (animations + ESP tags)
 --------------------------------------------------------------------------------
 local lastTagUpdate = 0
 
 RunService.RenderStepped:Connect(function(dt)
 	local t = os.clock()
 	local pulse = (math.sin(t * 5) + 1) / 2
+	local anyOn = espOn or aimOn
 
 	for _, g in ipairs(rotating) do
-		g.Rotation = (g.Rotation + dt * (espOn and 200 or 45)) % 360
+		g.Rotation = (g.Rotation + dt * (anyOn and 200 or 45)) % 360
 	end
 
-	local lookSpeed = espOn and 3 or 1.2
+	local lookSpeed = anyOn and 3 or 1.2
 	for _, e in ipairs(irises) do
 		e.iris.Position = UDim2.new(
 			0.5, math.sin(t * lookSpeed) * e.range,
@@ -1150,12 +1528,14 @@ RunService.RenderStepped:Connect(function(dt)
 		)
 	end
 
-	if espOn then
-		pillDot.BackgroundTransparency = pulse * 0.7
+	if anyOn then
 		launcherGlow.BackgroundTransparency = 0.72 + pulse * 0.2
 	end
+	espPill.dot.BackgroundTransparency = pulse * 0.7
+	aimPill.dot.BackgroundTransparency = pulse * 0.7
+	marker.Rotation = 45 + math.sin(t * 4) * 8
 
-	-- Update tags ~10x per second
+	-- Update ESP tags ~10x per second
 	if espOn and t - lastTagUpdate > 0.1 then
 		lastTagUpdate = t
 		local char = player.Character
@@ -1181,6 +1561,6 @@ RunService.RenderStepped:Connect(function(dt)
 			end
 		end
 
-		pillCount.Text = seen .. " seen"
+		espPill.info.Text = seen .. " seen"
 	end
 end)
